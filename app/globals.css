@@ -1,0 +1,67 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+  /* User-facing Tusker variables (all 8). The runtime --tusker-<n> values are
+     applied on <html> by next/font; these aliases are what components reference
+     as var(--font-tusker-<n>). Declared explicitly because Tailwind's @theme
+     only emits a variable once a utility using it is actually generated. */
+  --font-tusker-6700: var(--tusker-6700);
+  --font-tusker-6800: var(--tusker-6800);
+  --font-tusker-7600: var(--tusker-7600);
+  --font-tusker-7700: var(--tusker-7700);
+  --font-tusker-7800: var(--tusker-7800);
+  --font-tusker-8700: var(--tusker-8700);
+  --font-tusker-8800: var(--tusker-8800);
+  --font-tusker-9800: var(--tusker-9800);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-instrument-sans);
+  --font-mono: var(--font-geist-mono);
+  /* Tusker tokens: make `font-tusker-<n>` utilities compile. Values inline the
+     runtime vars directly, so nothing is emitted to :root from here — the
+     variables themselves live in the :root block above. */
+  --font-tusker-6700: var(--tusker-6700);
+  --font-tusker-6800: var(--tusker-6800);
+  --font-tusker-7600: var(--tusker-7600);
+  --font-tusker-7700: var(--tusker-7700);
+  --font-tusker-7800: var(--tusker-7800);
+  --font-tusker-8700: var(--tusker-8700);
+  --font-tusker-8800: var(--tusker-8800);
+  --font-tusker-9800: var(--tusker-9800);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  /* instrument-sans is applied on <html> by next/font; body inherits the custom property */
+  font-family: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Lenis smooth scroll — base styles the lib expects. Lenis toggles `lenis` /
+   `lenis-smooth` on <html>; these keep native anchor jumps and wheel behavior
+   from fighting the lerp. */
+html.lenis,
+html.lenis body {
+  height: auto;
+}
+.lenis.lenis-smooth {
+  scroll-behavior: auto !important;
+}
+.lenis.lenis-stopped {
+  overflow: hidden;
+}
+.lenis.lenis-smooth [data-lenis-prevent] {
+  overscroll-behavior: contain;
+}

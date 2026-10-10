@@ -1,0 +1,55 @@
+/**
+ * GET /api/panta/markets/{id} — a single public market.
+ *
+ * The [id] is validated against a strict charset before it is ever placed in a
+ * Panta URL path (never URL-encoded into a path we do not control). A
+ * non-conforming id is a 404, not a 400 — an enumeration probe learns nothing.
+ */
+import { NextResponse } from 'next/server';
+import { fetchMarket } from '@/lib/panta/read-adapters';
+import {
+  NO_STORE,
+  pantaClientOr503,
+  transportErrorResponse,
+} from '@/lib/panta/route-helpers';
+
+/** Market ids are slugs/keys; anything else is not one of ours. */
+const MARKET_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+type RouteContext = { params: Promise<{ id: string }> };
+
+export async function GET(
+  _request: Request,
+  context: RouteContext,
+): Promise<NextResponse> {
+  const { id } = await context.params;
+
+  // Phase 3 (path injection / enumeration): reject before touching the network.
+  if (!MARKET_ID.test(id)) {
+    return NextResponse.json(
+      { error: 'market not found' },
+      { status: 404, headers: NO_STORE },
+    );
+  }
+
+  const ready = pantaClientOr503();
+  if ('response' in ready) return ready.response;
+
+  const result = await fetchMarket(ready.client, id);
+  if (!result.ok) return transportErrorResponse(result.error);
+  if (result.value === null) {
+    return NextResponse.json(
+      { error: 'market not found' },
+      { status: 404, headers: NO_STORE },
+    );
+  }
+
+  return NextResponse.json(
+    {
+      market: result.value,
+      provenance: 'live',
+      asOf: new Date().toISOString(),
+    },
+    { headers: NO_STORE },
+  );
+}
