@@ -21,7 +21,30 @@
 'use client';
 
 import { PrivyProvider } from '@privy-io/react-auth';
+import { toSolanaWalletConnectors } from '@privy-io/react-auth/solana';
 import type { PropsWithChildren } from 'react';
+
+/**
+ * Solana wallet-standard connectors for Privy.
+ *
+ * REQUIRED whenever the app has Solana wallet login enabled: without it
+ * `client.connectors.walletConnectors` stays empty, `useStandardWallets()`
+ * degrades to Privy's internal placeholder wallet (name "Privy") — which can
+ * never return an account for this app — and the SDK logs "no Solana wallet
+ * connectors have been passed to Privy".
+ *
+ * `onMount()` registers every wallet currently in the global wallet-standard
+ * registry (Phantom / Backpack / Solflare / …) as a Privy connector, keeping
+ * them in sync via the registry's register/unregister events.
+ *
+ * Hoisted to a module constant on purpose (Phase 3): the connectors object is
+ * an effect dependency inside PrivyProvider — creating it inline would give it
+ * a fresh identity on every render and churn mount/unmount of the connector
+ * listeners. `shouldAutoConnect: false` keeps connection strictly
+ * user-initiated (our custom modal calls `standard:connect` on tap); listing is
+ * unaffected by the flag.
+ */
+const SOLANA_CONNECTORS = toSolanaWalletConnectors({ shouldAutoConnect: false });
 
 /**
  * Brand wordmark for the modal header.
@@ -85,6 +108,21 @@ export function CallitPrivyProvider({ children }: PropsWithChildren) {
           // Solana-only: this product settles on Solana, so EVM wallets would be
           // noise. (Offering fewer options, not a weaker check.)
           walletChainType: 'solana-only',
+          // Wallet is the ONLY login method, so it must show first. Pinned
+          // explicitly: when email/sms/social are all disabled the SDK resolves
+          // this from the dashboard and warns that it "has been set to true";
+          // setting it here makes the intent explicit and silences that warning.
+          showWalletLoginFirst: true,
+        },
+        externalWallets: {
+          solana: {
+            // Solana wallet login is enabled on this app, so the SDK requires
+            // the connectors object here (see SOLANA_CONNECTORS above). Omitting
+            // it leaves `useStandardWallets()` with only Privy's internal
+            // placeholder — the wallet picker would list a single dead "Privy"
+            // row whose connect() returns no accounts.
+            connectors: SOLANA_CONNECTORS,
+          },
         },
         embeddedWallets: {
           solana: {

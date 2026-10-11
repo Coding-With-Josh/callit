@@ -52,6 +52,25 @@ export type AuthModalMode = 'login' | 'link';
 const PREFERRED_WALLETS = ['Phantom', 'Backpack', 'Solflare'];
 const MAINNET_CHAIN = 'solana:mainnet';
 
+/**
+ * True for Privy's internal placeholder standard wallet (display name "Privy").
+ *
+ * It bridges embedded wallets and can never yield an account for this app
+ * (`createOnLogin: 'off'`, external wallets only), so listing it only produces a
+ * dead row whose `connect()` resolves empty. This mirrors the SDK's own
+ * exclusion predicate in `toSolanaWalletConnectors` (`features['privy:'] &&
+ * 'isPrivyWallet' in w && w.isPrivyWallet`) — matching the display name instead
+ * would be spoofable by a real wallet that happens to be named "Privy".
+ */
+function isPrivyPlaceholder(wallet: SolanaStandardWallet): boolean {
+  const features = wallet.features as Record<string, unknown>;
+  return (
+    !!features['privy:'] &&
+    'isPrivyWallet' in wallet &&
+    (wallet as { isPrivyWallet?: boolean }).isPrivyWallet === true
+  );
+}
+
 type ConnectedAccount = NonNullable<SolanaStandardWallet['accounts'][number]>;
 
 type FlowState =
@@ -150,13 +169,17 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
     [reduce],
   );
 
-  // Mainnet-capable wallets that can sign a message, Phantom/Backpack/Solflare
-  // first, then the rest alphabetically. Fail-closed: wallets without
-  // solana:signMessage cannot authenticate and are hidden.
+  // Mainnet-capable external wallets that can sign a message,
+  // Phantom/Backpack/Solflare first, then the rest alphabetically.
+  // Fail-closed: wallets without `solana:signMessage` cannot authenticate, and
+  // Privy's own placeholder wallet is excluded (external wallets only).
   const candidates = useMemo(() => {
     if (!walletsReady) return [];
     const usable = wallets.filter(
-      (w) => w.chains.includes(MAINNET_CHAIN) && !!w.features['solana:signMessage'],
+      (w) =>
+        w.chains.includes(MAINNET_CHAIN) &&
+        !!w.features['solana:signMessage'] &&
+        !isPrivyPlaceholder(w),
     );
     const preferred = PREFERRED_WALLETS.map((name) =>
       usable.find((w) => w.name === name),
@@ -211,10 +234,22 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
         if (!connectFeature) {
           throw new Error('This wallet cannot connect here (no connect feature).');
         }
-        const { accounts } = await connectFeature.connect();
-        const account = accounts[0];
+        const connectOut = await connectFeature.connect();
+        // Defensive account resolution: some wallet builds resolve connect()
+        // with an EMPTY accounts array (silent no-op) when the connection was
+        // already authorized — or when the approval popup is dismissed without
+        // approving. The wallet's own `accounts` registry, kept in sync via
+        // standard:events, is authoritative in the already-authorized case.
+        // The address still comes from the wallet itself, never from user
+        // input (Phase 3, B1 boundary).
+        let account: ConnectedAccount | null = connectOut.accounts[0] ?? null;
         if (!account) {
-          throw new Error('The wallet returned no account.');
+          account = wallet.accounts[0] ?? null;
+        }
+        if (!account) {
+          throw new Error(
+            'No account returned. Open your wallet and approve the connection popup, then try again.',
+          );
         }
         const address = String(account.address);
 
