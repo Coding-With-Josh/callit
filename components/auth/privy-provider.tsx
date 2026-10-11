@@ -1,20 +1,22 @@
 /**
  * auth/privy-provider — wraps app with PrivyProvider (client).
  *
- * Identity model (decided 2026-10-11): KEEP Privy, EXTERNAL WALLETS ONLY.
- * Embedded wallet creation is disabled (`createOnLogin: 'off'`), so a Privy
- * account's only wallet is one the user connected/linked themselves — the same
- * wallet they can use on X via Blinks. Login is wallet-first
- * (`showWalletLoginFirst: true`); email/Google remain as account login, but
- * without a linked wallet the server session mint still 403s `no-wallet`
- * (identity-verifier) — the app is unusable until a wallet is linked, by
- * design, and the UI surfaces a "Link wallet" affordance (wallet-pill).
+ * Identity model (decided 2026-10-11, revised 2026-10-11): KEEP Privy as the
+ * identity backend, EXTERNAL WALLETS ONLY, WALLET-ONLY login. No email, no
+ * Google, no embedded wallet (`createOnLogin: 'off'`): a Privy account's only
+ * wallet is one the user connected themselves — the same wallet they can use
+ * on X via Blinks.
  *
- * Styling — the `appearance` block maps Privy's login modal onto the Callit
- * palette: cream `#FFF2DD` surface, brown `#2D1C00` accent, and the Tusker
- * wordmark. The two things `appearance` cannot express — the Instrument Sans
- * body font and the rounded-corner scale — are pinned in `app/globals.css`
- * against Privy's DOM ids (`#privy-dialog` / `#privy-modal-content`).
+ * The login UI is NOT Privy's modal: it is our own (components/auth/auth-modal)
+ * which signs a headless Privy SIWS message (useLoginWithSiws / useLinkWithSiws)
+ * — Privy's documented "SIWS implementation without Privy UIs" flow. This
+ * provider config just pins which login methods Privy will accept; the
+ * `appearance` block below exists only so any residual Privy surface (e.g. an
+ * unexpected modal flash) stays on-brand: cream `#FFF2DD`, brown `#2D1C00`,
+ * Tusker wordmark, solana-only wallet list. Two things `appearance` cannot
+ * express — the Instrument Sans body font and the rounded-corner scale — are
+ * pinned in `app/globals.css` against Privy's DOM ids (`#privy-dialog` /
+ * `#privy-modal-content`).
  */
 'use client';
 
@@ -67,9 +69,10 @@ export function CallitPrivyProvider({ children }: PropsWithChildren) {
     <PrivyProvider
       appId={appId}
       config={{
-        // Wallet first: the product's identity is a wallet; email/Google are
-        // conveniences, not the identity.
-        loginMethods: ['wallet', 'email', 'google'],
+        // Wallet-only: the product's identity is a wallet. No email, no
+        // Google — the custom modal (auth-modal.tsx) is the only login UI and
+        // accepts wallets only.
+        loginMethods: ['wallet'],
         appearance: {
           // Cream surface: Privy derives the foreground/border palette from the
           // luminance of this value (high-luminance => light theme).
@@ -79,10 +82,8 @@ export function CallitPrivyProvider({ children }: PropsWithChildren) {
           logo: LOGO,
           landingHeader: 'Log in to callit',
           loginMessage: 'Back the markets you believe in.',
-          // Wallet-first login: present the wallet picker before email/social.
-          showWalletLoginFirst: true,
           // Solana-only: this product settles on Solana, so EVM wallets would be
-          // noise in the picker. (Offering fewer options, not a weaker check.)
+          // noise. (Offering fewer options, not a weaker check.)
           walletChainType: 'solana-only',
         },
         embeddedWallets: {

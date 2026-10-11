@@ -1,18 +1,25 @@
 /**
  * auth/use-solana-signer — the REAL external-wallet signing path.
  *
- * Resolves the connected Solana standard wallet from Privy
- * (`useWallets` from the `@privy-io/react-auth/solana` subpath — the ROOT
- * `useWallets` is the EVM-only interface and must not be used here), runs the
- * fail-closed signer gate from lib/solana/sign, and prompts the wallet to
- * sign. Replaces the setTimeout stub pattern; the future create/buy adapters
+ * Resolves the connected Solana standard wallet that holds the session
+ * identity account (from `useStandardWallets` on the
+ * `@privy-io/react-auth/solana` subpath), runs the fail-closed signer gate
+ * from lib/solana/sign, and prompts that wallet to sign via the
+ * wallet-standard `solana:signTransaction` feature — the same headless
+ * transport the custom auth modal uses for connecting, so no Privy UI is
+ * involved anywhere in this flow.
+ *
+ * Replaces the setTimeout stub pattern; the future create/buy adapters
  * consume `sign(transactionB64)` which speaks Panta's `unsignedTransactionB64`
  * format and returns the base58 signature.
  *
  * Phase 3 (signer substitution / multi-sig laundering): the transaction's sole
  * required signer MUST equal BOTH the session identity wallet (client view of
  * linkedAccounts, the same source the server identity-verifier uses) AND the
- * connected wallet instance about to sign — checked before the wallet prompt.
+ * connected wallet account about to sign — checked before the wallet prompt.
+ * The account used for signing is the one whose address === identity wallet;
+ * if that account is not currently connected we fail closed (`no-wallet`)
+ * rather than silently signing with any other wallet.
  *
  * Phase 3 (devnet drift): the chain is pinned to `solana:mainnet` — the
  * product is mainnet-only and this file never signs for devnet/testnet.
@@ -20,8 +27,11 @@
 'use client';
 
 import { usePrivy } from '@privy-io/react-auth';
-import { useWallets } from '@privy-io/react-auth/solana';
-import { useCallback } from 'react';
+import {
+  type SolanaStandardWallet,
+  useStandardWallets,
+} from '@privy-io/react-auth/solana';
+import { useCallback, useMemo } from 'react';
 import { err, ok, type Result } from '@/types';
 import type { WalletAddress } from '@/types';
 import { useWallet } from './use-wallet';
@@ -50,7 +60,7 @@ export interface SignedTransaction {
 export interface SolanaSigner {
   /** Session identity wallet (linked account, client view). */
   readonly wallet: WalletAddress | null;
-  /** Address of the connected standard wallet instance that would sign. */
+  /** Address of the currently-connected wallet account that would sign. */
   readonly connectedAddress: string | null;
   /** True when authenticated and a matching connected wallet is present. */
   readonly ready: boolean;
@@ -59,24 +69,36 @@ export interface SolanaSigner {
   ) => Promise<Result<SignedTransaction, SignRequestError>>;
 }
 
+type ConnectedAccount = NonNullable<SolanaStandardWallet['accounts'][number]>;
+
 export function useSolanaSigner(): SolanaSigner {
   const { ready, authenticated } = usePrivy();
   const { wallet: identityWallet } = useWallet();
-  // Solana-subpath hook: every wallet here is a ConnectedStandardSolanaWallet
-  // (Solana-only), so there is no `.type` to filter on.
-  const { wallets, ready: solanaWalletsReady } = useWallets();
+  const { wallets: standardWallets, ready: standardWalletsReady } =
+    useStandardWallets();
 
-  // Prefer the connected wallet whose address matches the session identity;
-  // fall back to the first connected Solana wallet (fail-closed: if none,
-  // `connected` is null and `sign` refuses).
-  const connected =
-    wallets.find((w) => w.address === identityWallet) ?? wallets[0] ?? null;
+  // The standard wallet whose connected accounts include the session identity
+  // address, plus that exact account. Fail-closed: if the identity wallet is
+  // not currently connected, `connected` is null and `sign` refuses — the
+  // user reconnects through the auth modal, never silently through another
+  // wallet.
+  const connected = useMemo<{
+    readonly wallet: SolanaStandardWallet;
+    readonly account: ConnectedAccount;
+  } | null>(() => {
+    if (!identityWallet) return null;
+    for (const wallet of standardWallets) {
+      const account = wallet.accounts.find((a) => a.address === identityWallet);
+      if (account) return { wallet, account };
+    }
+    return null;
+  }, [standardWallets, identityWallet]);
 
   const sign = useCallback(
     async (
       transactionB64: string,
     ): Promise<Result<SignedTransaction, SignRequestError>> => {
-      if (!solanaWalletsReady || !ready || !authenticated) {
+      if (!standardWalletsReady || !ready || !authenticated) {
         return err({ kind: 'unauthenticated' });
       }
       if (!identityWallet) return err({ kind: 'no-wallet' });
@@ -108,19 +130,29 @@ export function useSolanaSigner(): SolanaSigner {
       if (txSigner !== identityWallet) {
         return err({ kind: 'signer-mismatch', txSigner, expected: identityWallet });
       }
-      // 3. The wallet we are about to prompt must be that same wallet.
-      if (connected.address !== identityWallet) {
+      // 3. The account we are about to prompt must be that same wallet.
+      if (connected.account.address !== identityWallet) {
         return err({
           kind: 'signer-mismatch',
-          txSigner: connected.address ?? '',
+          txSigner: connected.account.address,
           expected: identityWallet,
         });
       }
 
-      // 4. Prompt the user's wallet. Mainnet-only, per the product model.
+      // 4. Prompt the user's wallet via its wallet-standard feature.
+      //    Mainnet-only, per the product model.
+      const signTransactionFeature = connected.wallet.features['solana:signTransaction'];
+      if (!signTransactionFeature) {
+        return err({
+          kind: 'wallet-rejected',
+          message: 'connected wallet cannot sign transactions',
+        });
+      }
+
       let signedTransaction: Uint8Array;
       try {
-        const out = await connected.signTransaction({
+        const [out] = await signTransactionFeature.signTransaction({
+          account: connected.account,
           transaction: bytes,
           chain: 'solana:mainnet',
         });
@@ -146,13 +178,13 @@ export function useSolanaSigner(): SolanaSigner {
 
       return ok({ signedTransaction, signature, wallet: identityWallet });
     },
-    [ready, solanaWalletsReady, authenticated, identityWallet, connected],
+    [ready, standardWalletsReady, authenticated, identityWallet, connected],
   );
 
   return {
     wallet: identityWallet,
-    connectedAddress: connected?.address ?? null,
-    ready: ready && solanaWalletsReady && authenticated && !!identityWallet && !!connected,
+    connectedAddress: connected?.account.address ?? null,
+    ready: ready && standardWalletsReady && authenticated && !!identityWallet && !!connected,
     sign,
   };
 }
