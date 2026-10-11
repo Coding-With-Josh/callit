@@ -285,6 +285,35 @@ export function pantaClientFromEnv(
 // nowhere else) is what keeps a base-unit/decimal or ISO/unix mix-up from
 // reaching the domain (Phase 3: unit confusion).
 
+/** A human-readable message for a transport error; safe to show a user. */
+export function transportMessage(error: PantaTransportError): string {
+  switch (error.kind) {
+    case 'http':
+      return error.error.message;
+    case 'timeout':
+      return `the Panta request timed out after ${error.timeoutMs}ms`;
+    case 'config':
+    case 'network':
+    case 'malformed':
+      return error.message;
+  }
+}
+
+/**
+ * Thrown by the thin adapters (which return promises, not Results) so the
+ * create/buy pipelines' `try/catch` can turn a transport failure into a typed
+ * adapter error. Carries the original transport error for callers that need it.
+ */
+export class PantaCallError extends Error {
+  readonly transport: PantaTransportError;
+  constructor(transport: PantaTransportError) {
+    super(transportMessage(transport));
+    this.name = 'PantaCallError';
+    this.transport = transport;
+  }
+}
+
+
 /** Wire base-unit integer string -> domain decimal USDC. */
 export function wireBaseUnitsToUsdc(value: string): UsdcDecimal {
   return baseUnitsToUsdcDecimal(baseUnitsFromJson(baseUnitsJsonSchema.parse(value)));

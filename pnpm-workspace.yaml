@@ -1,3 +1,13 @@
+# allowBuilds controls whether a dependency's install/postinstall script may run.
+# Values MUST be booleans -- the earlier "set this to true or false" strings were
+# pnpm's printed hint text pasted verbatim, which left the packages undecided and
+# made `pnpm install` (and therefore `pnpm run dev`) exit 1 with ERR_PNPM_IGNORED_BUILDS.
+# All four below are denied: each has a verified JS fallback or a non-essential script,
+# so denying keeps installs portable (no native toolchain needed on arm64).
 allowBuilds:
+  '@reown/appkit': false   # postinstall is only a semver version-check; safe to skip
+  bufferutil: false        # optional ws native addon; falls back to ./fallback
+  keccak: false            # no darwin-arm64 prebuild; try/catch falls back to ./js
   sharp: false
   unrs-resolver: false
+  utf-8-validate: false    # optional ws native addon; node-gyp-build try/catch

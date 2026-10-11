@@ -30,8 +30,24 @@ import {
   type MarketWire,
   type Price,
   type Result,
+  type UnixSeconds,
 } from '@/types';
 import type { PantaClient, PantaTransportError } from './client';
+import { wireIsoToUnixSeconds } from './client';
+
+/**
+ * The only shape a market id may take. A Panta market id is a slug/key; this
+ * excludes `/`, `.` and `%`, so an id can never introduce a path segment or a
+ * traversal when it is interpolated into `/markets/${id}/` (Phase 3: path
+ * injection / SSRF). The transport's SAFE_PATH/DOT_SEGMENT/origin checks are
+ * the second layer.
+ */
+export const MARKET_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Wire time -> domain UnixSeconds. The live API mixes ISO strings and unix ints. */
+function wireTimeToUnix(value: number | string): UnixSeconds {
+  return typeof value === 'number' ? unixSeconds(value) : wireIsoToUnixSeconds(value);
+}
 
 /** Map a present wire price to a domain Price, or null if out of range. */
 function priceOrNull(raw: string | null): Price | null {
@@ -56,9 +72,9 @@ export function toDomainMarket(
       description: wire.description,
       phase: wire.phase,
       volumeUsdc: usdcDecimalSchema.parse(wire.volumeUsdc),
-      startTime: unixSeconds(wire.startTime),
-      endTime: unixSeconds(wire.endTime),
-      resolutionTime: unixSeconds(wire.resolutionTime),
+      startTime: wireTimeToUnix(wire.startTime),
+      endTime: wireTimeToUnix(wire.endTime),
+      resolutionTime: wireTimeToUnix(wire.resolutionTime),
       resolved: wire.resolved,
       yesPrice: priceOrNull(wire.yesPrice),
       noPrice: priceOrNull(wire.noPrice),
@@ -72,22 +88,32 @@ export function toDomainMarket(
 }
 
 /** GET /categories/ -> the category allowlist as returned by Panta. */
+export interface CategoriesReadResult {
+  readonly categories: readonly string[];
+  readonly disclaimer: string | null;
+}
+
 export async function fetchCategories(
   client: PantaClient,
-): Promise<Result<readonly string[], PantaTransportError>> {
+): Promise<Result<CategoriesReadResult, PantaTransportError>> {
   const result = await client.request({
     method: 'GET',
     path: '/categories/',
     schema: categoriesResponseSchema,
   });
   if (!result.ok) return err(result.error);
-  return ok(result.value.categories);
+  return ok({
+    categories: result.value.categories,
+    disclaimer: result.value.disclaimer ?? null,
+  });
 }
 
 /** A page of markets plus the cursor for the next page. */
 export interface MarketListResult {
   readonly markets: readonly Market[];
   readonly nextCursor: string | null;
+  /** Sandbox notice when the API reports one; null means none was sent. */
+  readonly disclaimer: string | null;
 }
 
 /** GET /markets/ -> a mapped page of markets. */
@@ -110,14 +136,29 @@ export async function fetchMarketList(
     if (!mapped.ok) return err(mapped.error);
     markets.push(mapped.value);
   }
-  return ok({ markets, nextCursor: result.value.nextCursor ?? null });
+  return ok({
+    markets,
+    nextCursor: result.value.nextCursor ?? null,
+    disclaimer: result.value.disclaimer ?? null,
+  });
+}
+
+/** A single market read. `market` is null when Panta reports 404. */
+export interface MarketReadResult {
+  readonly market: Market | null;
+  readonly disclaimer: string | null;
 }
 
 /** GET /markets/{id}/ -> the mapped market, or null when Panta reports 404. */
 export async function fetchMarket(
   client: PantaClient,
   id: string,
-): Promise<Result<Market | null, PantaTransportError>> {
+): Promise<Result<MarketReadResult, PantaTransportError>> {
+  // Perimeter: an id that is not a plain slug is treated as "no such market"
+  // and never reaches the network (Phase 3: path injection / enumeration).
+  if (!MARKET_ID_PATTERN.test(id)) {
+    return ok({ market: null, disclaimer: null });
+  }
   const result = await client.request({
     method: 'GET',
     path: `/markets/${id}/`,
@@ -125,11 +166,14 @@ export async function fetchMarket(
   });
   if (!result.ok) {
     if (result.error.kind === 'http' && result.error.status === 404) {
-      return ok(null);
+      return ok({ market: null, disclaimer: null });
     }
     return err(result.error);
   }
   const mapped = toDomainMarket(result.value);
   if (!mapped.ok) return err(mapped.error);
-  return ok(mapped.value);
+  return ok({
+    market: mapped.value,
+    disclaimer: result.value.disclaimer ?? null,
+  });
 }

@@ -1,5 +1,10 @@
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
+import {
+  previewCardDataUri,
+  previewCardSlotsForMarket,
+} from "@/lib/create-image";
+import { loadCoverFontCssServer } from "@/lib/create-image.server";
 import { type MarketFixture } from "@/lib/market-fixtures";
 import { formatUnixDate, formatUsdc } from "@/lib/format";
 import { type Market, type MarketPhase } from "@/types";
@@ -12,8 +17,16 @@ import { TradeDeck } from "./trade-deck";
  * surface is one client island (TradeDeck) that owns side selection and the
  * phase guard.
  */
-export const MarketDetail = ({ fixture }: { fixture: MarketFixture }) => {
-  const { market, asOf: readAt, provenance } = fixture;
+export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
+  const { market, asOf: readAt, provenance, disclaimer } = fixture;
+
+  // Server-rendered preview card: the Tusker face is embedded from disk (see
+  // loadCoverFontCssServer) so the card renders in the house face with no client
+  // JS. Any embed failure degrades to the system-ui fallback, never a throw.
+  const cardSrc = previewCardDataUri(
+    previewCardSlotsForMarket(market),
+    await loadCoverFontCssServer(),
+  );
 
   return (
     <div className="mx-auto w-full max-w-6xl px-6 pt-28 pb-24 md:px-12">
@@ -25,7 +38,22 @@ export const MarketDetail = ({ fixture }: { fixture: MarketFixture }) => {
         All markets
       </Link>
 
-      <header className="mt-8 max-w-3xl">
+      {/* The market's preview card: same builder as the create-wizard draft,
+          but with the market's real phase and yes-price. It reads as the
+          market's identity; the h1 below keeps the claim as real text for
+          SEO/screen readers (the card is an image). */}
+      <figure className="mt-8 max-w-3xl">
+        {/* eslint-disable-next-line @next/next/no-img-element -- SVG data URI, not a remote/optimisable asset. */}
+        <img
+          src={cardSrc}
+          alt={market.title}
+          width={1200}
+          height={630}
+          className="w-full rounded-[24px] ring-1 ring-[#2D1C00]/10"
+        />
+      </figure>
+
+      <header className="mt-10 max-w-3xl">
         <div className="flex items-center justify-start gap-3">
           <div className="flex items-center justify-center rounded-full px-3 py-1 bg-[#2D1C00]">
             <p className="text-xs font-semibold tracking-tight text-[#FFF2DD]">
@@ -50,6 +78,15 @@ export const MarketDetail = ({ fixture }: { fixture: MarketFixture }) => {
         <div className="mt-5">
           <PantaBadge />
         </div>
+
+        {/* The API's own sandbox notice, surfaced verbatim: a live pk_test read
+            is not a real market, and this is how the reader knows (Phase 3:
+            sandbox-as-live). Text child — escaped, never markup. */}
+        {disclaimer && (
+          <p className="mt-5 rounded-xl bg-[#2D1C00]/5 px-4 py-2.5 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/55 ring-1 ring-[#2D1C00]/10">
+            {disclaimer}
+          </p>
+        )}
       </header>
 
       <div className="mt-10">
@@ -106,8 +143,8 @@ const ResolutionRules = () => (
       Resolution is determined by Panta&apos;s oracle.
     </p>
     <p className="mt-2 font-mono font-medium text-[11px] tracking-tight text-[#2D1C00]/45">
-      Full rules and sources of truth appear here once the market detail API is
-      wired.
+      The full rule and its sources of truth are published by Panta alongside the
+      market.
     </p>
   </section>
 );

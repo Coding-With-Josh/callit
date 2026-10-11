@@ -23,15 +23,28 @@ import {
 } from './common';
 
 /**
- * Provenance: documented. POST /markets/create/image-upload/ response.
- * `fields` values are string OR number (the docs example returns `timestamp`
- * as a JSON number), and `expiresAt` is ISO-8601.
+ * Provenance: documented + reconciled against live. The docs describe the signed
+ * fields as a nested `fields` object; the live (sandbox) response returns the
+ * same Cloudinary fields FLATTENED (cloudName/apiKey/timestamp/folder/signature)
+ * with a non-functional `uploadUrl`. Both shapes parse here. Append every
+ * recognized field plus `file` when posting to `uploadUrl` (see P5b).
  */
+const uploadFieldValue = z.union([z.string(), z.number()]);
+
 export const imageUploadResponseSchema = z.object({
   uploadUrl: z.string(),
-  fields: z.record(z.string(), z.union([z.string(), z.number()])),
-  publicId: z.string(),
-  expiresAt: isoTimestampWireSchema,
+  publicId: z.string().optional(),
+  public_id: z.string().optional(),
+  expiresAt: isoTimestampWireSchema.optional(),
+  /** Documented form: signed fields nested in `fields`. */
+  fields: z.record(z.string(), uploadFieldValue).optional(),
+  /** Live (sandbox) form: the same fields flattened onto the response. */
+  cloudName: z.string().optional(),
+  apiKey: z.string().optional(),
+  timestamp: uploadFieldValue.optional(),
+  folder: z.string().optional(),
+  signature: z.string().optional(),
+  disclaimer: z.string().optional(),
 });
 export type ImageUploadResponse = z.infer<typeof imageUploadResponseSchema>;
 
@@ -74,18 +87,31 @@ export const createQuoteResponseSchema = z.object({
 });
 export type CreateQuoteResponse = z.infer<typeof createQuoteResponseSchema>;
 
-/** Provenance: documented. POST /markets/create/build/ response (base64 versioned tx). */
-export const createBuildResponseSchema = z.object({
+/** Provenance: documented. POST /markets/create/build/ request body. */
+export const createBuildRequestSchema = z.object({
   createId: z.string(),
-  expectedEventPda: z.string(),
+  /** If set, must equal the wallet from quote (docs). */
+  wallet: z.string().optional(),
+});
+export type CreateBuildRequest = z.infer<typeof createBuildRequestSchema>;
+
+/**
+ * Provenance: documented, reconciled against live. The docs example includes
+ * `createId` and the fee fields, but the live (sandbox) build response OMITS
+ * them; both are optional here. `transaction` is required — an empty string
+ * still parses (the adapter rejects it, since there is then nothing to sign).
+ */
+export const createBuildResponseSchema = z.object({
+  createId: z.string().optional(),
+  expectedEventPda: z.string().optional(),
   transaction: z.string(),
   recentBlockhash: z.string(),
   lastValidBlockHeight: z.number().int(),
   blockhashExpiryHintSec: z.number().int().optional(),
   buildFingerprint: z.string(),
-  paymentUsdc: baseUnitStringWireSchema,
-  liquidityInjectionUsdc: baseUnitStringWireSchema,
-  platformRevenueUsdc: baseUnitStringWireSchema,
+  paymentUsdc: baseUnitStringWireSchema.optional(),
+  liquidityInjectionUsdc: baseUnitStringWireSchema.optional(),
+  platformRevenueUsdc: baseUnitStringWireSchema.optional(),
   marketType: marketTypeWireSchema.optional(),
   derived: derivedAccountsWireSchema.optional(),
   expiresAt: isoTimestampWireSchema,

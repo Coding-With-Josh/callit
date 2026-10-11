@@ -21,7 +21,8 @@ export async function GET(): Promise<NextResponse> {
 
   return NextResponse.json(
     {
-      categories: result.value,
+      categories: result.value.categories,
+      disclaimer: result.value.disclaimer,
       provenance: 'live',
       asOf: new Date().toISOString(),
     },

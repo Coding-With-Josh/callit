@@ -10,12 +10,20 @@ import {
   cursorSchema,
   marketCategorySlugSchema,
   marketPhaseWireSchema,
+  marketTimeWireSchema,
   marketTypeWireSchema,
 } from './common';
+
+/**
+ * An optional sandbox notice. The live pk_test API returns this on every
+ * response; a caller must surface it so sandbox data is never shown as live.
+ */
+const disclaimerFieldSchema = z.string().optional();
 
 /** Provenance: documented. GET /categories/ -> { categories: string[] }. */
 export const categoriesResponseSchema = z.object({
   categories: z.array(z.string()),
+  disclaimer: disclaimerFieldSchema,
 });
 export type CategoriesResponse = z.infer<typeof categoriesResponseSchema>;
 
@@ -46,9 +54,9 @@ export const marketWireSchema = z.object({
   images: z.array(z.string()),
   phase: marketPhaseWireSchema,
   marketType: marketTypeWireSchema,
-  startTime: z.number().int(),
-  endTime: z.number().int(),
-  resolutionTime: z.number().int(),
+  startTime: marketTimeWireSchema,
+  endTime: marketTimeWireSchema,
+  resolutionTime: marketTimeWireSchema,
   region: z.string(),
   resolved: z.boolean(),
   status: z.string(),
@@ -61,6 +69,11 @@ export const marketWireSchema = z.object({
   primaryNoPrice: z.string().nullable(),
   secondaryYesPrice: z.string().nullable(),
   secondaryNoPrice: z.string().nullable(),
+  // Additive fields the live detail endpoint returns; optional so the list
+  // shape (which omits them) still parses.
+  creatorAddress: z.string().optional(),
+  onChain: z.unknown().nullable().optional(),
+  disclaimer: disclaimerFieldSchema,
 });
 export type MarketWire = z.infer<typeof marketWireSchema>;
 
@@ -68,6 +81,7 @@ export type MarketWire = z.infer<typeof marketWireSchema>;
 export const marketListResponseSchema = z.object({
   items: z.array(marketWireSchema),
   nextCursor: z.string().nullable().optional(),
+  disclaimer: disclaimerFieldSchema,
 });
 export type MarketListResponse = z.infer<typeof marketListResponseSchema>;
 

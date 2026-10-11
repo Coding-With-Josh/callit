@@ -11,6 +11,9 @@
     "test:types": "vitest run --config vitest.config.mts"
   },
   "dependencies": {
+    "@privy-io/react-auth": "3.48.1",
+    "@privy-io/server-auth": "1.32.5",
+    "@solana/kit": "^8.4.0",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.4.0",
     "date-fns": "^4.4.0",

@@ -69,6 +69,57 @@ describe('draft pipeline', () => {
     expect(validateDraft(raw.value, context).ok).toBe(true);
   });
 
+  it('rejects a start date on a previous calendar day (no past-date markets)', () => {
+    // now sits two days after the epoch start; startTime is day 0.
+    const later: DraftValidationContext = {
+      categories: ['weather'],
+      now: unixSecondsSchema.parse(2 * 86_400),
+    };
+    const raw = parseRawDraft({ ...validInput, startTime: 0 });
+    if (!raw.ok) throw new Error('expected ok');
+    const validated = validateDraft(raw.value, later);
+    expect(validated.ok).toBe(false);
+    if (!validated.ok) {
+      expect(validated.error.errors.some((e) => e.field === 'startTime')).toBe(true);
+    }
+  });
+
+  it('rejects a past-day start even for a breaking in-progress market', () => {
+    const later: DraftValidationContext = {
+      categories: ['weather'],
+      now: unixSecondsSchema.parse(2 * 86_400),
+    };
+    const raw = parseRawDraft({
+      ...validInput,
+      startTime: 0,
+      marketType: 'breaking',
+      eventInProgress: true,
+    });
+    if (!raw.ok) throw new Error('expected ok');
+    const validated = validateDraft(raw.value, later);
+    expect(validated.ok).toBe(false);
+    if (!validated.ok) {
+      expect(validated.error.errors.some((e) => e.field === 'startTime')).toBe(true);
+    }
+  });
+
+  it('accepts a draft whose start is on today with enough lead', () => {
+    const midday: DraftValidationContext = {
+      categories: ['weather'],
+      now: unixSecondsSchema.parse(86_400 + 3_600), // day 1, 01:00 UTC
+    };
+    // The wizard lifts a same-day pick up to the lead floor: open 3,700s out,
+    // still on today's calendar day.
+    const raw = parseRawDraft({
+      ...validInput,
+      startTime: midday.now + 3700,
+      endTime: midday.now + 4700,
+      resolutionTime: midday.now + 5700,
+    });
+    if (!raw.ok) throw new Error('expected ok');
+    expect(validateDraft(raw.value, midday).ok).toBe(true);
+  });
+
   it('allows a draft to become resolvable only through both validators', () => {
     const raw = parseRawDraft(validInput);
     if (!raw.ok) throw new Error('expected ok');

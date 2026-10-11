@@ -47,3 +47,13 @@ export function formatUsdc(usdc: UsdcDecimal): string {
   const cents = `${frac}00`.slice(0, 2);
   return `$${grouped}.${cents}`;
 }
+
+/**
+ * A share Price IS a USDC decimal in [0, 1] ("0.03" = 3 cents), so the card
+ * renders it as dollars ("$0.03"). Deliberate brand-boundary cast: the caller
+ * is asserting the price should be read as a dollar decimal for display. No
+ * floats involved — delegates to the pure string formatter.
+ */
+export function formatPriceUsdc(price: Price): string {
+  return formatUsdc(price as unknown as UsdcDecimal);
+}

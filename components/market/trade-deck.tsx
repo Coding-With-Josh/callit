@@ -2,6 +2,7 @@
 
 import { ArrowUpRightFromSquare } from "lucide-react";
 import { useState } from "react";
+import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import {
   displayPrice,
   feeDisclosure,
@@ -23,6 +24,52 @@ interface TradeDeckProps {
   readonly readAt: AsOf;
   readonly provenance: DataProvenance;
 }
+
+/**
+ * The buy CTA's gate (Phase 1: complete mediation). Connecting is an affordance
+ * only — it grants no server privilege, and the server route that will
+ * build/sign re-checks auth independently and fails closed. This component never
+ * builds or signs anything: live signing stays disabled in preview.
+ */
+const TradeActionButton = ({ side }: { side: Side }) => {
+  const { ready, authenticated, unavailable, login } = usePrivyGate();
+
+  if (!authenticated) {
+    const blocked = unavailable;
+    return (
+      <button
+        type="button"
+        disabled={!ready || blocked}
+        aria-busy={!ready && !blocked}
+        title={
+          blocked
+            ? "Wallet login is unavailable — this origin must be allowlisted in the Privy dashboard"
+            : undefined
+        }
+        onClick={() => {
+          if (ready) login();
+        }}
+        className="mt-5 w-full rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+      >
+        {blocked
+          ? "Login unavailable"
+          : `Connect to back ${side === "yes" ? "YES" : "NO"}`}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      disabled
+      aria-disabled="true"
+      title="Live signing lands with the trading backend"
+      className="mt-5 w-full cursor-not-allowed rounded-full bg-[#2D1C00]/15 py-3 text-sm font-semibold tracking-tight text-[#2D1C00]/50"
+    >
+      Sign with wallet
+    </button>
+  );
+};
 
 /**
  * The trading surface — one client island. Owns the side selection shared by
@@ -143,7 +190,6 @@ const OddsBoard = ({
 };
 
 const SideButton = ({
-  side,
   label,
   display,
   selected,
@@ -204,7 +250,6 @@ const SideButton = ({
 const BuySlip = ({
   market,
   readAt,
-  provenance,
   side,
   onSelectSide,
 }: {
@@ -317,19 +362,11 @@ const BuySlip = ({
         />
       </dl>
 
-      <button
-        type="button"
-        disabled
-        aria-disabled="true"
-        title="Wallet connect and live quotes come with the trading backend"
-        className="mt-5 w-full cursor-not-allowed rounded-full bg-[#2D1C00]/15 py-3 text-sm font-semibold tracking-tight text-[#2D1C00]/50"
-      >
-        Sign with wallet
-      </button>
-      {/* <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
-        Preview structure — no transaction is built or signed. Wallet connect
-        and live quotes land with the trading backend.
-      </p> */}
+      <TradeActionButton side={side} />
+      <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
+        Connecting links your wallet. No transaction is built or signed in
+        preview.
+      </p>
 
       <div className="mt-4 flex items-center justify-between border-t border-[#2D1C00]/10 pt-3">
         <PantaBadge />

@@ -15,7 +15,13 @@ import { NextResponse } from 'next/server';
 import { pantaClientFromEnv, type PantaClient, type PantaTransportError } from './client';
 
 /** Every catalog read is live and must not be cached or replayed. */
-export const NO_STORE = { 'cache-control': 'no-store' } as const;
+export const NO_STORE = {
+  'cache-control': 'no-store',
+  // Phase 3 (index-state injection): these handlers return JSON, not documents.
+  // A crawler that reaches one (or a link to one) must never index it as a page.
+  // Defence in depth behind the robots.txt `Disallow: /api/` rule.
+  'X-Robots-Tag': 'noindex, nofollow',
+} as const;
 
 /** Either a ready client, or a fail-closed response to return immediately. */
 export type PantaRouteReady =

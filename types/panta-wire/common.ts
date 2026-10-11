@@ -142,6 +142,17 @@ export const isoTimestampWireSchema = z
 export const unixSecondsWireSchema = z.number().int();
 
 /**
+ * A market timestamp. The docs type these as unix integers, but the live API
+ * (pk_test) returns ISO-8601 strings; accept BOTH and normalize at the
+ * transport boundary so neither shape breaks a read.
+ */
+export const marketTimeWireSchema = z.union([
+  unixSecondsWireSchema,
+  isoTimestampWireSchema,
+]);
+export type MarketTimeWire = z.infer<typeof marketTimeWireSchema>;
+
+/**
  * A safe `derived` account key: a plain identifier that is not a prototype
  * key. `__proto__` fails the leading-letter rule; `constructor`/`prototype`
  * are excluded explicitly (Phase 3: prototype pollution via untrusted keys).

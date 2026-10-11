@@ -22,6 +22,20 @@ export const unixSecondsSchema = z
   .brand<'UnixSeconds'>();
 export type UnixSeconds = z.infer<typeof unixSecondsSchema>;
 
+/** Seconds in one UTC day (calendar-day arithmetic; UTC has no DST). */
+const DAY_SECONDS = 86_400;
+
+/**
+ * The Unix seconds at 00:00:00 UTC of the UTC day containing `value`.
+ * The calendar-day floor that backs the "a market can never OPEN on a
+ * previous day" rule (Phase 3: past-date injection via LLM output or a
+ * crafted request must fail at the validator, not just the date input).
+ * Throws on negative input, consistent with the UnixSeconds brand.
+ */
+export function startOfUnixDay(value: number): UnixSeconds {
+  return unixSecondsSchema.parse(Math.floor(value / DAY_SECONDS) * DAY_SECONDS);
+}
+
 /** An ISO-8601 UTC timestamp string, e.g. "2026-01-01T00:00:00.000Z". */
 export const isoTimestampSchema = z.iso.datetime().brand<'IsoTimestamp'>();
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;

@@ -3,21 +3,27 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link2, Loader2, Pencil, Plus, X } from "lucide-react";
+import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import {
   checkResolvabilityStep,
+  checkSource,
   draftFromClaim,
   editDraft,
+  effectiveStartSeconds,
   fixtureCreateAdapters,
   openQuoteStep,
+  requireVerifiedSource,
   uploadCoverStep,
   validateDraftStep,
   type CreateAdapters,
   type CreateMarketError,
+  type SourceCheck,
 } from "@/lib/create-market";
 import {
   asOf,
   feeDisclosure,
   isoFromUnix,
+  MIN_STANDARD_LEAD_SECONDS,
   unixSeconds,
   type AsOf,
   type CreateLifecycle,
@@ -26,7 +32,7 @@ import {
   type RawDraft,
 } from "@/types";
 import { formatAsOf, formatUnixDate, formatUsdc } from "@/lib/format";
-import { templatedCoverDataUri } from "@/lib/create-image";
+import { loadCoverFontCss, templatedCoverDataUri } from "@/lib/create-image";
 import { PantaBadge } from "@/components/market/panta-badge";
 import {
   Select,
@@ -75,6 +81,97 @@ const unixFromDateInput = (value: string): number | null => {
   return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
 };
 
+/** Calendar-day floor (UTC). Plain math — never throws on draft values. */
+const DAY_SECONDS = 86_400;
+const dayStartOf = (seconds: number): number =>
+  Math.floor(seconds / DAY_SECONDS) * DAY_SECONDS;
+
+/** Key per-source checks by URL for the wizard's chips. */
+const checksRecord = (
+  checks: readonly SourceCheck[],
+): Record<string, SourceCheck> =>
+  Object.fromEntries(checks.map((check) => [check.url, check]));
+
+/**
+ * The sign step's gate (Phase 1: complete mediation).
+ *
+ * Connecting a wallet here is an *affordance* only — it grants no server
+ * privilege, and this island is never the authority. The server route that will
+ * build/sign re-checks auth independently and fails closed. It constructs
+ * nothing: live signing stays disabled in preview, so no transaction is built
+ * or signed and no market id is fabricated.
+ */
+const SignStepButton = () => {
+  const { ready, authenticated, unavailable, login } = usePrivyGate();
+
+  if (!authenticated) {
+    const blocked = unavailable;
+    return (
+      <button
+        type="button"
+        disabled={!ready || blocked}
+        aria-busy={!ready && !blocked}
+        title={
+          blocked
+            ? "Wallet login is unavailable — this origin must be allowlisted in the Privy dashboard"
+            : undefined
+        }
+        onClick={() => {
+          if (ready) login();
+        }}
+        className="w-full rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+      >
+        {blocked ? "Login unavailable" : "Connect to sign"}
+      </button>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      disabled
+      aria-disabled="true"
+      title="Live signing lands with the trading backend"
+      className="w-full cursor-not-allowed rounded-full bg-[#2D1C00]/15 py-3 text-sm font-semibold tracking-tight text-[#2D1C00]/50"
+    >
+      Sign with wallet
+    </button>
+  );
+};
+
+/**
+ * The generated cover, as an image. Fetches the Tusker face once (cached in
+ * `loadCoverFontCss`) and embeds it in the SVG so the headline renders in the
+ * house face inside an `<img>`; until it resolves — or if the fetch fails — the
+ * cover renders in the `system-ui` fallback rather than not at all.
+ */
+const CoverPreview = ({ question }: { question: string }) => {
+  const [fontCss, setFontCss] = useState("");
+  useEffect(() => {
+    let alive = true;
+    void loadCoverFontCss().then((css) => {
+      if (alive) setFontCss(css);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  // Memoised: the data URI embeds the whole font (~48KB base64), so it must not
+  // be rebuilt on every render.
+  const src = useMemo(
+    () => templatedCoverDataUri(question, fontCss),
+    [question, fontCss],
+  );
+  return (
+    // eslint-disable-next-line @next/next/no-img-element -- SVG data URI, not a remote/optimisable asset; next/image adds nothing here.
+    <img
+      src={src}
+      alt="Preview of the generated market cover"
+      className="aspect-[1200/630] w-full object-cover"
+    />
+  );
+};
+
 export const CreateWizard = () => {
   const [claim, setClaim] = useState("");
   const [raw, setRaw] = useState<RawDraft | null>(null);
@@ -84,9 +181,23 @@ export const CreateWizard = () => {
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
   const [categories, setCategories] = useState<readonly string[]>([]);
   const [showDates, setShowDates] = useState(false);
+  // Verified-source chips: keyed by the trimmed URL, stamped by the service.
+  const [sourceChecks, setSourceChecks] = useState<Record<string, SourceCheck>>({});
+  const [verifyingSources, setVerifyingSources] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
+  const [startDateError, setStartDateError] = useState<string | null>(null);
 
   const status: WizardStatus = lifecycle ? lifecycle.status : "intake";
-  const preview = adapters.provenance !== "live";
+
+  // Calendar-day view of the start date: today vs a later pick (the user is
+  // told the market opens on the day they set), and the lead this draft needs.
+  const startDay = raw ? dayStartOf(raw.startTime) : dayStartOf(adapters.now());
+  const opensLater = startDay > dayStartOf(adapters.now());
+  const startLeadSeconds =
+    raw?.marketType === "breaking" && raw.eventInProgress === true
+      ? 0
+      : MIN_STANDARD_LEAD_SECONDS;
 
   useEffect(() => {
     let active = true;
@@ -114,6 +225,38 @@ export const CreateWizard = () => {
 
   const updateRaw = (edits: Partial<RawDraft>) =>
     setRaw((prev) => (prev ? { ...prev, ...edits } : prev));
+
+  /** Persist a sources edit and invalidate checks for URLs that no longer
+   *  exist in the list. Fail-closed: an edited URL must verify again — the
+   *  old verdict never carries over. */
+  const updateSources = (next: readonly string[]) => {
+    updateRaw({ sourcesOfTruth: [...next] });
+    const present = new Set(
+      next.map((source) => source.trim()).filter((s) => s.length > 0),
+    );
+    setSourceChecks((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([url]) => present.has(url)),
+      ),
+    );
+  };
+
+  /** Verify one source through the service (never the adapter directly). */
+  const onVerifySource = async (url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    setVerifyingSources((prev) => new Set(prev).add(trimmed));
+    try {
+      const check = await checkSource(trimmed, adapters);
+      setSourceChecks((prev) => ({ ...prev, [trimmed]: check }));
+    } finally {
+      setVerifyingSources((prev) => {
+        const next = new Set(prev);
+        next.delete(trimmed);
+        return next;
+      });
+    }
+  };
 
   const stepIndex = useMemo(() => {
     switch (status) {
@@ -146,12 +289,26 @@ export const CreateWizard = () => {
       setRaw(result.value.status === "drafted" ? result.value.raw : null);
       setCoverUrl(null);
       setShowDates(false);
+      setSourceChecks({});
+      setVerifyingSources(new Set());
+      setStartDateError(null);
     });
 
   const onContinueDraft = () =>
     run(async () => {
       if (!raw) return;
       setError(null);
+      // Phase 1 (source-of-truth gate): no next stage without at least one
+      // VERIFIED public source of truth. Re-verifies fresh on every continue.
+      const gate = await requireVerifiedSource(raw.sourcesOfTruth, adapters);
+      if (!gate.ok) {
+        if (gate.error.kind === "unverified_source") {
+          setSourceChecks(checksRecord(gate.error.checks));
+        }
+        setError(gate.error);
+        return;
+      }
+      setSourceChecks(checksRecord(gate.value));
       // Revision is a fresh draft (Phase 1): edits apply through the service.
       const restarted = editDraft(raw, {});
       const validated = await validateDraftStep(restarted, adapters);
@@ -180,6 +337,20 @@ export const CreateWizard = () => {
     run(async () => {
       if (!lifecycle || lifecycle.status !== "resolvable") return;
       setError(null);
+      // Fresh verification at the spend boundary (Phase 3: no stale source
+      // proof) — a source that went down since the draft stage stops here.
+      const gate = await requireVerifiedSource(
+        lifecycle.draft.sourcesOfTruth,
+        adapters,
+      );
+      if (!gate.ok) {
+        if (gate.error.kind === "unverified_source") {
+          setSourceChecks(checksRecord(gate.error.checks));
+        }
+        setError(gate.error);
+        return;
+      }
+      setSourceChecks(checksRecord(gate.value));
       let url = coverUrl;
       if (!url && raw) {
         const cover = await uploadCoverStep(raw, adapters);
@@ -203,6 +374,9 @@ export const CreateWizard = () => {
     setLifecycle(editDraft(raw, {}));
     setError(null);
     setCoverUrl(null);
+    setSourceChecks({});
+    setVerifyingSources(new Set());
+    setStartDateError(null);
   };
 
   const onStartOver = () => {
@@ -212,6 +386,9 @@ export const CreateWizard = () => {
     setError(null);
     setCoverUrl(null);
     setShowDates(false);
+    setSourceChecks({});
+    setVerifyingSources(new Set());
+    setStartDateError(null);
   };
 
   const draftActive = status === "drafted" || status === "validated";
@@ -328,14 +505,13 @@ export const CreateWizard = () => {
           >
             <div className="flex flex-col gap-5">
               {/* The invisible image step made visible: a templated cover from
-                  the question. Local data URI — always labeled preview. */}
+                  the question. Always labeled preview. Rendered as an <img> of a
+                  self-contained SVG data URI — the Tusker face is embedded
+                  inside the SVG (see loadCoverFontCss) because an <img> is an
+                  isolated document that cannot reach the page's webfonts. The
+                  question is XML-escaped by templatedCoverDataUri. */}
               <figure className="overflow-hidden rounded-2xl ring-1 ring-[#2D1C00]/10">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={templatedCoverDataUri(raw.question)}
-                  alt="Preview of the generated market cover"
-                  className="aspect-[1200/630] w-full object-cover"
-                />
+                <CoverPreview question={raw.question} />
                 <figcaption className="bg-[#2D1C00]/5 px-3 py-2 font-tusker-6700 text-[10px] uppercase tracking-[0.18em] text-[#2D1C00]/45">
                   Cover preview · generated from the question
                 </figcaption>
@@ -401,51 +577,94 @@ export const CreateWizard = () => {
 
               <div>
                 <span className={labelClass}>Sources of truth</span>
-                <div className="mt-2 flex flex-col gap-2">
-                  {raw.sourcesOfTruth.map((source, index) => (
-                    <div key={index} className="flex items-center gap-2">
-                      <input
-                        type="url"
-                        value={source}
-                        placeholder="https://…"
-                        spellCheck={false}
-                        autoComplete="off"
-                        onChange={(event) => {
-                          const next = raw.sourcesOfTruth.map((current, i) =>
-                            i === index ? event.target.value : current,
-                          );
-                          updateRaw({ sourcesOfTruth: next });
-                        }}
-                        className={inputClass}
-                      />
-                      <button
-                        type="button"
-                        aria-label={`Remove source ${index + 1}`}
-                        onClick={() =>
-                          updateRaw({
-                            sourcesOfTruth: raw.sourcesOfTruth.filter(
-                              (_current, i) => i !== index,
-                            ),
-                          })
-                        }
-                        className="shrink-0 rounded-full p-2 text-[#2D1C00]/45 transition-colors hover:bg-[#2D1C00]/5 hover:text-[#2D1C00]"
-                      >
-                        <X className="size-4" strokeWidth={2.5} />
-                      </button>
-                    </div>
-                  ))}
+                <div className="mt-2 flex flex-col gap-3">
+                  {raw.sourcesOfTruth.map((source, index) => {
+                    const trimmed = source.trim();
+                    const check = trimmed ? sourceChecks[trimmed] : undefined;
+                    const checking =
+                      trimmed !== "" && verifyingSources.has(trimmed);
+                    return (
+                      <div key={index} className="flex flex-col gap-1.5">
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="url"
+                            value={source}
+                            placeholder="https://…"
+                            spellCheck={false}
+                            autoComplete="off"
+                            onChange={(event) => {
+                              const next = raw.sourcesOfTruth.map(
+                                (current, i) =>
+                                  i === index ? event.target.value : current,
+                              );
+                              updateSources(next);
+                            }}
+                            className={inputClass}
+                          />
+                          <button
+                            type="button"
+                            aria-label={`Remove source ${index + 1}`}
+                            onClick={() =>
+                              updateSources(
+                                raw.sourcesOfTruth.filter(
+                                  (_current, i) => i !== index,
+                                ),
+                              )
+                            }
+                            className="shrink-0 rounded-full p-2 text-[#2D1C00]/45 transition-colors hover:bg-[#2D1C00]/5 hover:text-[#2D1C00]"
+                          >
+                            <X className="size-4" strokeWidth={2.5} />
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-1">
+                          {check?.ok ? (
+                            <span
+                              className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 font-mono text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200"
+                              title={`Verified ${formatAsOf(
+                                asOf(isoFromUnix(check.checkedAt)),
+                              )}`}
+                            >
+                              Verified source
+                            </span>
+                          ) : check && !check.ok ? (
+                            <span
+                              role="alert"
+                              className="inline-flex max-w-full items-center truncate rounded-full bg-red-50 px-2.5 py-0.5 font-mono text-[10px] font-medium text-red-700 ring-1 ring-red-200"
+                              title={check.reason}
+                            >
+                              Not verified — {check.reason ?? "check failed"}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void onVerifySource(trimmed)}
+                              disabled={checking || trimmed === ""}
+                              className="inline-flex cursor-pointer items-center gap-1.5 font-sans text-[10px] font-bold uppercase tracking-[0.14em] text-[#2D1C00]/45 transition-colors hover:text-[#2D1C00] disabled:cursor-not-allowed disabled:opacity-40"
+                            >
+                              {checking && (
+                                <Loader2 className="size-3 animate-spin" />
+                              )}
+                              {checking ? "Checking…" : "Verify source"}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
                 <button
                   type="button"
-                  onClick={() =>
-                    updateRaw({
-                      sourcesOfTruth: [...raw.sourcesOfTruth, ""],
-                    })
-                  }
+                  onClick={() => updateSources([...raw.sourcesOfTruth, ""])}
                   className="cursor-pointer mt-2 inline-flex items-center gap-1.5 font-sans font-bold text-[11px] uppercase text-[#2D1C00]/55 transition-colors hover:text-[#2D1C00]"
                 >
                   <Plus className="size-3" strokeWidth={2.5} /> Add source
                 </button>
+                {!Object.values(sourceChecks).some((check) => check.ok) && (
+                  <p className="mt-2 text-xs font-medium leading-relaxed tracking-tight text-[#2D1C00]/55">
+                    A verified public source of truth is required before you
+                    can continue.
+                  </p>
+                )}
               </div>
 
               <div>
@@ -489,9 +708,61 @@ export const CreateWizard = () => {
                 </button>
                 {showDates && (
                   <div className="mt-3 grid gap-4 sm:grid-cols-3">
+                    <div>
+                      <label htmlFor="draft-startTime" className={labelClass}>
+                        Starts
+                      </label>
+                      {/* Start date defaults to today and can only move
+                          FORWARD: the input's min is today, a past pick is
+                          refused outright (never mutates the draft — the
+                          domain validator enforces the same rule), and a
+                          chosen day is lifted to the lead floor so "today"
+                          stays valid. */}
+                      <input
+                        id="draft-startTime"
+                        type="date"
+                        min={dateInputValue(adapters.now())}
+                        value={dateInputValue(raw.startTime)}
+                        onChange={(event) => {
+                          const dayStart = unixFromDateInput(event.target.value);
+                          if (dayStart === null) return;
+                          if (dayStartOf(dayStart) < dayStartOf(adapters.now())) {
+                            setStartDateError(
+                              "Start date can't be before today",
+                            );
+                            return;
+                          }
+                          setStartDateError(null);
+                          updateRaw({
+                            startTime: effectiveStartSeconds(
+                              dayStart,
+                              adapters.now(),
+                              startLeadSeconds,
+                            ),
+                          });
+                        }}
+                        className={`mt-2 ${inputClass}`}
+                      />
+                      {startDateError && (
+                        <p
+                          role="alert"
+                          className="mt-2 text-xs font-medium text-red-700"
+                        >
+                          {startDateError}
+                        </p>
+                      )}
+                      {!startDateError && opensLater && (
+                        <p
+                          role="note"
+                          className="mt-2 text-xs font-medium leading-relaxed text-[#2D1C00]/60"
+                        >
+                          This market will open on {displayDate(raw.startTime)}{" "}
+                          — trading won&apos;t start before that date.
+                        </p>
+                      )}
+                    </div>
                     {(
                       [
-                        ["startTime", "Starts"],
                         ["endTime", "Ends"],
                         ["resolutionTime", "Resolves"],
                       ] as const
@@ -541,8 +812,10 @@ export const CreateWizard = () => {
           >
             <div className="flex flex-col gap-4">
               <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
-                This draft has a public source of truth and a rule specific
-                enough to resolve. The next step opens Panta&apos;s quote.
+                This draft has a verified public source of truth and a rule
+                specific enough to resolve. The next step opens Panta&apos;s
+                quote — the source is re-checked right before the quote so it
+                can&apos;t have silently gone away.
               </p>
               <div>
                 <Pill onClick={onOpenQuote} busy={busy}>
@@ -586,23 +859,14 @@ export const CreateWizard = () => {
           </Section>
         )}
 
-        {/* 05 — Sign (hard stop) */}
+        {/* 05 — Sign (gated; hard stop on signing) */}
         {status === "quoted" && (
           <Section index={5} title="Sign" state="active">
-            <button
-              type="button"
-              disabled
-              aria-disabled="true"
-              title="Wallet connect and live quotes come with the trading backend"
-              className="w-full cursor-not-allowed rounded-full bg-[#2D1C00]/15 py-3 text-sm font-semibold tracking-tight text-[#2D1C00]/50"
-            >
-              Sign with wallet
-            </button>
-            {/* <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
-              Preview stops here — nothing is built or signed, and no market is
-              registered. Wallet connect and real signing land with the trading
-              backend.
-            </p> */}
+            <SignStepButton />
+            <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
+              Connecting links your wallet. Live signing is still disabled — no
+              transaction is built or signed, and no market is registered.
+            </p>
           </Section>
         )}
 
@@ -800,6 +1064,40 @@ const DraftRule = ({ rule }: { rule: string }) => (
 /** Renders every CreateMarketError variant honestly; never a raw throw. */
 const ErrorPanel = ({ error }: { error: CreateMarketError | null }) => {
   if (!error) return null;
+
+  if (error.kind === "unverified_source") {
+    return (
+      <div
+        role="alert"
+        className="mt-4 rounded-xl bg-amber-50 p-4 ring-1 ring-amber-200"
+      >
+        <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-amber-900/70">
+          Verified source required
+        </p>
+        <p className="mt-1 text-sm font-medium leading-relaxed text-amber-900">
+          {error.checks.length === 0
+            ? "Add at least one public source of truth, then verify it."
+            : "Continuing needs at least one verified source of truth. Every source must check out:"}
+        </p>
+        {error.checks.length > 0 && (
+          <ul className="mt-2 space-y-1.5 text-sm leading-relaxed">
+            {error.checks.map((check) => (
+              <li key={check.url} className="flex flex-col">
+                <span className="font-mono text-xs text-amber-900/80">
+                  {check.url}
+                </span>
+                <span
+                  className={check.ok ? "text-emerald-700" : "text-red-700"}
+                >
+                  {check.ok ? "verified" : check.reason ?? "not verified"}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    );
+  }
 
   if (error.kind === "unresolvable") {
     return (

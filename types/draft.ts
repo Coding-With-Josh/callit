@@ -16,6 +16,7 @@ import { err, ok, type Result } from './result';
 import {
   MIN_STANDARD_LEAD_SECONDS,
   meetsStandardLead,
+  startOfUnixDay,
   unixSecondsSchema,
   type UnixSeconds,
 } from './time';
@@ -150,6 +151,13 @@ export function validateDraft(
   if (!start.success) {
     errors.push({ field: 'startTime', message: 'startTime must be a non-negative integer' });
   } else {
+    // Phase 3 (past-date injection): a market may never OPEN on a day before
+    // today — regardless of market type. The wizard's date input and min attr
+    // are UX; this unconditional day check is the authoritative wall, so an
+    // LLM or crafted draft that lands on a previous day is rejected here.
+    if (startOfUnixDay(start.data) < startOfUnixDay(context.now)) {
+      errors.push({ field: 'startTime', message: 'start date must not be before today' });
+    }
     const usesBreaking = raw.marketType === 'breaking' && raw.eventInProgress === true;
     if (!usesBreaking && !meetsStandardLead(start.data, context.now)) {
       errors.push({

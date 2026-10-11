@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { Navbar } from "@/components/sections/navbar";
+import { Footer } from "@/components/sections/footer";
 
 /** Segment-level 404 for unknown market ids (renders with a real 404 status). */
 export default function MarketNotFound() {
@@ -16,11 +17,12 @@ export default function MarketNotFound() {
         </p>
         <Link
           href="/#browse"
-          className="mt-6 inline-flex items-center justify-center rounded-full bg-[#2D1C00] px-6 py-2.5 text-sm font-semibold tracking-tight text-white hover:scale-102 active:scale-98 transition-all"
+          className="mt-6 inline-flex items-center justify-center rounded-full bg-[#2D1C00] px-6 py-2.5 text-sm font-semibold tracking-tight text-white transition hover:scale-102 active:scale-98"
         >
           Browse markets
         </Link>
       </div>
+      <Footer />
     </main>
   );
 }

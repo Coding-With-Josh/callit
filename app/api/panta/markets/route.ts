@@ -51,6 +51,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     {
       markets: result.value.markets,
       nextCursor: result.value.nextCursor,
+      disclaimer: result.value.disclaimer,
       provenance: 'live',
       asOf: new Date().toISOString(),
     },

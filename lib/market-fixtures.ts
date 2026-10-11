@@ -3,8 +3,8 @@
  *
  * NOT live data. Every read here carries provenance "fixture"; the UI renders
  * that label next to each price (types/compliance: fixtures never pass as
- * live). Replaced by GET /api/panta/markets/{id} once the proxy route exists
- * (see build.md backend checklist).
+ * live). Used by lib/panta/catalog as the labeled fallback when the live read
+ * is unavailable; see that module for the live path.
  *
  * Two fixtures exercise the two UI paths:
  *   - "demo-primary"     primary phase  -> buy panel structure
@@ -26,6 +26,12 @@ export interface MarketFixture {
   /** When this read was taken. Every displayed price must carry this. */
   readonly asOf: AsOf;
   readonly provenance: DataProvenance;
+  /**
+   * The API's own sandbox notice, when one was sent (pk_test labels every
+   * response "Test mode …"). Rendered wherever the fixture is, so sandbox data
+   * is never read as a real market even when provenance is "live".
+   */
+  readonly disclaimer: string | null;
 }
 
 const READ_AS_OF = asOf("2026-10-10T12:00:00.000Z");
@@ -50,6 +56,7 @@ const FIXTURES: Record<string, MarketFixture> = {
     },
     asOf: READ_AS_OF,
     provenance: PROVENANCE,
+    disclaimer: null,
   },
   "demo-graduated": {
     market: {
@@ -69,6 +76,7 @@ const FIXTURES: Record<string, MarketFixture> = {
     },
     asOf: READ_AS_OF,
     provenance: PROVENANCE,
+    disclaimer: null,
   },
 };
 
@@ -79,10 +87,10 @@ export function getMarketFixture(id: string): MarketFixture | null {
 }
 
 /**
- * Ids of the fixture markets. Used by the route's generateStaticParams while
- * fixtures stand in for the API (so unknown ids 404 at the routing layer).
- * Removed when the market detail fetch lands.
+ * The fixture markets, in declaration order. Used by the catalog loader as the
+ * labeled fallback when the live read is unavailable — never as a stand-in
+ * presented as live.
  */
-export function listMarketFixtureIds(): string[] {
-  return Object.keys(FIXTURES);
+export function listMarketFixtures(): MarketFixture[] {
+  return Object.values(FIXTURES);
 }

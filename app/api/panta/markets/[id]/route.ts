@@ -37,7 +37,7 @@ export async function GET(
 
   const result = await fetchMarket(ready.client, id);
   if (!result.ok) return transportErrorResponse(result.error);
-  if (result.value === null) {
+  if (result.value.market === null) {
     return NextResponse.json(
       { error: 'market not found' },
       { status: 404, headers: NO_STORE },
@@ -46,7 +46,8 @@ export async function GET(
 
   return NextResponse.json(
     {
-      market: result.value,
+      market: result.value.market,
+      disclaimer: result.value.disclaimer,
       provenance: 'live',
       asOf: new Date().toISOString(),
     },

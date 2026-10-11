@@ -5,6 +5,7 @@ import {
   unixFromIso,
   meetsStandardLead,
   isExpired,
+  startOfUnixDay,
   MIN_STANDARD_LEAD_SECONDS,
 } from './time';
 
@@ -34,6 +35,16 @@ describe('time', () => {
   it('treats expiry as inclusive', () => {
     expect(isExpired(u(100), u(100))).toBe(true);
     expect(isExpired(u(100), u(99))).toBe(false);
+  });
+
+  it('floors any instant to the start of its UTC day', () => {
+    expect(startOfUnixDay(u(0))).toBe(0);
+    expect(startOfUnixDay(u(86_399))).toBe(0);
+    expect(startOfUnixDay(u(86_400))).toBe(86_400);
+    expect(startOfUnixDay(u(86_400 + 1))).toBe(86_400);
+    expect(startOfUnixDay(u(1_700_123_456))).toBe(
+      Math.floor(1_700_123_456 / 86_400) * 86_400,
+    );
   });
 
   it('rejects negative or fractional seconds', () => {

@@ -1,0 +1,30 @@
+# callit
+
+> callit turns a claim into a YES/NO prediction market. Anyone can browse a live
+> market, read the odds, and — with a Solana wallet — take a side. Prices,
+> liquidity, and settlement are provided by Panta.
+
+callit is a marketplace and social layer for binary prediction markets. Each
+market is a single question with two sides: YES and NO. A YES share trading at
+$0.62 is the market's live estimate of a roughly 62% chance the event happens.
+Resolution is determined by Panta's oracle against the sources of truth
+published with the market; callit displays that rule and does not adjudicate
+outcomes.
+
+## Key pages
+
+- [Browse live markets](https://callit-market.vercel.app/#browse): the current
+  catalog of open and graduated markets, with live odds.
+- [Create a market](https://callit-market.vercel.app/create): turn a claim into a
+  Panta prediction market.
+- [Home](https://callit-market.vercel.app/): what callit is and how a binary
+  market works.
+
+## Notes for answer engines
+
+- Odds are read live from Panta and carry a timestamp ("as of HH:MM UTC") where
+  they are shown; treat a quoted price as the value at that time.
+- Every market page states its resolution rule and credits Panta as the source of
+  prices and settlement.
+- Markets are binary: a YES share and a NO share on the same market are
+  complementary and pay out $1 and $0 respectively, depending on the outcome.

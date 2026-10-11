@@ -13,7 +13,10 @@
 import { z } from 'zod';
 
 /** Environment variables safe to expose to the browser. */
-export const PUBLIC_ENV_KEYS = ['NEXT_PUBLIC_APP_URL'] as const;
+export const PUBLIC_ENV_KEYS = [
+  'NEXT_PUBLIC_APP_URL',
+  'NEXT_PUBLIC_PRIVY_APP_ID',
+] as const;
 export type PublicEnvKey = (typeof PUBLIC_ENV_KEYS)[number];
 
 /** Environment variables that must never reach the browser. */
@@ -23,12 +26,15 @@ export const SERVER_ONLY_ENV_KEYS = [
   'SOLANA_RPC_URL',
   'DATABASE_URL',
   'LLM_API_KEY',
+  'PRIVY_APP_SECRET',
+  'SESSION_SECRET',
 ] as const;
 export type ServerOnlyEnvKey = (typeof SERVER_ONLY_ENV_KEYS)[number];
 
 /** Public environment schema (importable by client code by convention). */
 export const publicEnvSchema = z.object({
-  NEXT_PUBLIC_APP_URL: z.string(),
+  NEXT_PUBLIC_APP_URL: z.string().optional(),
+  NEXT_PUBLIC_PRIVY_APP_ID: z.string().min(1),
 });
 export type PublicEnv = z.infer<typeof publicEnvSchema>;
 
@@ -38,8 +44,11 @@ export const serverEnvSchema = z.object({
   PANTA_API_BASE_URL: z
     .string()
     .default('https://live-api.panta.market/api/v1'),
-  SOLANA_RPC_URL: z.string().min(1),
-  DATABASE_URL: z.string().min(1),
-  LLM_API_KEY: z.string().min(1),
+  SOLANA_RPC_URL: z.string().min(1).optional().default('https://api.devnet.solana.com'),
+  DATABASE_URL: z.string().min(1).optional(),
+  LLM_API_KEY: z.string().min(1).optional(),
+  PRIVY_APP_SECRET: z.string().min(1),
+  /** HMAC key for the signed session cookie. Must be >= 32 chars. */
+  SESSION_SECRET: z.string().min(32),
 });
 export type ServerEnv = z.infer<typeof serverEnvSchema>;

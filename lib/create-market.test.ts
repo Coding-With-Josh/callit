@@ -6,15 +6,24 @@
  * create_expired, and adapter failures become typed errors instead of throws.
  */
 import { describe, expect, it } from 'vitest';
-import { canCreateTransition, unixSeconds, type CreateLifecycle } from '@/types';
+import {
+  canCreateTransition,
+  MIN_STANDARD_LEAD_SECONDS,
+  startOfUnixDay,
+  unixSeconds,
+  type CreateLifecycle,
+} from '@/types';
 import {
   buildStep,
   checkResolvabilityStep,
+  checkSource,
   draftFromClaim,
   editDraft,
+  effectiveStartSeconds,
   fixtureCreateAdapters,
   openQuoteStep,
   registerStep,
+  requireVerifiedSource,
   signStep,
   uploadCoverStep,
   validateDraftStep,
@@ -100,7 +109,7 @@ describe('create-market pipeline', () => {
         question: 'Will X happen?',
         resolutionRule: 'short rule',
         sourcesOfTruth: ['not-a-public-url'],
-        category: 'Crypto',
+        category: 'crypto',
         startTime: fixtureCreateAdapters.now() + 86_400,
         endTime: fixtureCreateAdapters.now() + 30 * 86_400,
         resolutionTime: fixtureCreateAdapters.now() + 31 * 86_400,
@@ -208,13 +217,13 @@ describe('create-market pipeline', () => {
 
     const revised = editDraft(drafted.raw, {
       question: 'Will the EU pass an AI act by 2028?',
-      category: 'Politics',
+      category: 'politics',
     });
 
     expect(revised.status).toBe('drafted');
     if (revised.status === 'drafted') {
       expect(revised.raw.question).toBe('Will the EU pass an AI act by 2028?');
-      expect(revised.raw.category).toBe('Politics');
+      expect(revised.raw.category).toBe('politics');
       // injection flags come from the original parse and are retained.
       expect(revised.raw.injection).toEqual(drafted.raw.injection);
     }
@@ -259,7 +268,7 @@ describe('create-market pipeline', () => {
     const drafted = expectOk(await draftFromClaim(CLAIM, fixtureCreateAdapters));
     if (drafted.status !== 'drafted') throw new Error('expected drafted');
 
-    const restarted = editDraft(drafted.raw, { category: 'Politics' });
+    const restarted = editDraft(drafted.raw, { category: 'politics' });
     const validated = expectOk(
       await validateDraftStep(restarted, fixtureCreateAdapters),
     );
@@ -275,5 +284,108 @@ describe('create-market pipeline', () => {
     // Preview hard-stops here: quoted -> built is legal, but the island never
     // calls buildStep, so no transaction/signature/market id can exist.
     expect(canCreateTransition('quoted', 'built')).toBe(true);
+  });
+
+  it('defaults the start date to TODAY (never a fixed future date)', async () => {
+    const lc = expectOk(await draftFromClaim(CLAIM, fixtureCreateAdapters));
+    if (lc.status !== 'drafted') throw new Error('expected drafted');
+    const now = fixtureCreateAdapters.now();
+    // Earliest valid open: at least the standard lead ahead, same calendar day.
+    expect(lc.raw.startTime - now).toBeGreaterThanOrEqual(MIN_STANDARD_LEAD_SECONDS);
+    expect(startOfUnixDay(lc.raw.startTime)).toBe(startOfUnixDay(now));
+  });
+
+  it('rejects a draft whose start date is before today at the validator', async () => {
+    const pastDraftAdapters: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      generateDraft: async () => ({
+        question: CLAIM,
+        resolutionRule: `Resolves to YES if ${CLAIM} by the deadline; otherwise NO.`,
+        sourcesOfTruth: ['https://fixture.example.com/source-of-truth'],
+        category: 'crypto',
+        startTime: fixtureCreateAdapters.now() - 2 * 86_400, // two days ago
+        endTime: fixtureCreateAdapters.now() + 30 * 86_400,
+        resolutionTime: fixtureCreateAdapters.now() + 31 * 86_400,
+        marketType: 'standard',
+        eventInProgress: false,
+      }),
+    };
+    const drafted = expectOk(await draftFromClaim(CLAIM, pastDraftAdapters));
+    const validated = await validateDraftStep(drafted, fixtureCreateAdapters);
+    const e = expectErr(validated);
+    if (e.kind === 'validation') {
+      expect(e.errors.some((er) => er.field === 'startTime')).toBe(true);
+    } else {
+      throw new Error('expected validation');
+    }
+  });
+
+  it('lifts a chosen calendar day to the earliest valid open time', () => {
+    const now = fixtureCreateAdapters.now();
+    const dayStart = startOfUnixDay(now);
+    // Keeping "today" from the date input clamps up to the lead floor, so the
+    // market opens today (never on a previous day, never inside the lead).
+    expect(effectiveStartSeconds(dayStart, now, MIN_STANDARD_LEAD_SECONDS)).toBe(
+      now + MIN_STANDARD_LEAD_SECONDS,
+    );
+    // A future day keeps exactly that day's midnight.
+    const futureStart = dayStart + 3 * 86_400;
+    expect(effectiveStartSeconds(futureStart, now, MIN_STANDARD_LEAD_SECONDS)).toBe(
+      futureStart,
+    );
+    // Breaking markets (no lead) may open at the current instant.
+    expect(effectiveStartSeconds(dayStart, now, 0)).toBe(now);
+  });
+
+  it('requires at least one VERIFIED public source of truth to continue', async () => {
+    const missing = await requireVerifiedSource([], fixtureCreateAdapters);
+    expect(missing.ok).toBe(false);
+    if (!missing.ok) expect(missing.error.kind).toBe('unverified_source');
+
+    const publicOnly = await requireVerifiedSource(
+      ['https://fixture.example.com/source-of-truth'],
+      fixtureCreateAdapters,
+    );
+    expect(publicOnly.ok).toBe(true);
+
+    const blockedOnly = await requireVerifiedSource(
+      ['http://localhost/internal'],
+      fixtureCreateAdapters,
+    );
+    expect(blockedOnly.ok).toBe(false);
+    if (!blockedOnly.ok && blockedOnly.error.kind === 'unverified_source') {
+      expect(blockedOnly.error.checks[0]?.ok).toBe(false);
+    }
+  });
+
+  it('treats a source-verification outage as unverified, never a pass', async () => {
+    const broken: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      verifySource: async () => {
+        throw new Error('verifier down');
+      },
+    };
+    const result = await requireVerifiedSource(
+      ['https://fixture.example.com/source-of-truth'],
+      broken,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === 'unverified_source') {
+      expect(result.error.checks[0]?.ok).toBe(false);
+      expect(result.error.checks[0]?.reason).toContain('verifier down');
+    }
+  });
+
+  it('checkSource stamps a per-source verdict and never throws', async () => {
+    const good = await checkSource(
+      'https://fixture.example.com/source-of-truth',
+      fixtureCreateAdapters,
+    );
+    expect(good.ok).toBe(true);
+    expect(good.checkedAt).toBe(fixtureCreateAdapters.now());
+
+    const bad = await checkSource('not-a-url', fixtureCreateAdapters);
+    expect(bad.ok).toBe(false);
+    expect(bad.reason).toBeDefined();
   });
 });

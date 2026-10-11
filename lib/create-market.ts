@@ -18,8 +18,12 @@
  * Honest limit (mirrors the domain's): a runtime caller could hand any step a
  * lifecycle object that satisfies the union shape. The steps check the *stage*
  * transition table, and the only practical producer of lifecycle objects is
- * this module — the wizard holds what this module returns. Construction-level
- * safety lives in types/; this file adds runtime stage discipline on top.
+ * this module — the wizard holds what this module returns. The verified-source
+ * gate is the same pattern: `requireVerifiedSource` is the only place the
+ * wizard's next-stage decisions read verification state; it never computes
+ * "verified" itself, and an adapter outage fails the gate (never passes it).
+ * Construction-level safety lives in types/; this file adds runtime stage
+ * discipline on top.
  */
 import {
   beginCreate,
@@ -29,7 +33,9 @@ import {
   err,
   eventPdaSchema,
   isExpired,
+  MARKET_CATEGORY_SLUGS,
   marketId,
+  MIN_STANDARD_LEAD_SECONDS,
   ok,
   openCreateQuote,
   parseRawDraft,
@@ -63,7 +69,25 @@ export type CreateMarketError =
     }
   | { readonly kind: "validation"; readonly errors: readonly DraftFieldError[] }
   | { readonly kind: "unresolvable"; readonly report: ResolvabilityReport }
+  | {
+      readonly kind: "unverified_source";
+      readonly checks: readonly SourceCheck[];
+    }
   | { readonly kind: "adapter"; readonly message: string };
+
+/** Verdict from one source-verification adapter call (I/O, not a stage). */
+export interface SourceVerification {
+  readonly ok: boolean;
+  readonly reason?: string;
+}
+
+/** A stamped per-source check the wizard renders as Verify/Verified/Failed. */
+export interface SourceCheck {
+  readonly url: string;
+  readonly ok: boolean;
+  readonly reason?: string;
+  readonly checkedAt: UnixSeconds;
+}
 
 /** Every external call the create flow makes. Swappable (fixture vs. HTTP). */
 export interface CreateAdapters {
@@ -82,6 +106,14 @@ export interface CreateAdapters {
    * a locally-templated thumbnail, never presenting the fixture URL as live.
    */
   readonly uploadImage: (draft: LlmDraft) => Promise<string>;
+  /**
+   * Verify a user-supplied source of truth is reachable and public. This is the
+   * I/O behind the verified-source gate: no lifecycle stage past the draft is
+   * reached without at least one `ok` here. Live implementations run
+   * server-side only (SSRF surface — see lib/panta/source-verifier.ts). A
+   * throw is a FAILED check, never a pass (Phase 2: dependency failure).
+   */
+  readonly verifySource: (url: string) => Promise<SourceVerification>;
   /** Create quote. paymentUsdc in the result is the fee authority. */
   readonly requestQuote: (
     draft: ResolvableDraft,
@@ -368,6 +400,74 @@ export async function uploadCoverStep(
   }
 }
 
+// ─── Source-of-truth verification ────────────────────────────────────────────
+
+/**
+ * Lift a user's calendar-day choice (midnight UTC, from the date input) to the
+ * earliest VALID open time. The lead rule works in seconds but the wizard
+ * edits whole days: choosing "today" must not produce a timestamp the
+ * validator rejects, and choosing a day that is only seconds away (e.g.
+ * tomorrow picked at 23:59 UTC) is clamped to the floor instead of erroring.
+ * `minLeadSeconds` is the lead required by this market type (0 for a breaking
+ * in-progress market, MIN_STANDARD_LEAD_SECONDS otherwise).
+ */
+export function effectiveStartSeconds(
+  dayStart: number,
+  now: UnixSeconds,
+  minLeadSeconds: number,
+): UnixSeconds {
+  return unixSeconds(Math.max(dayStart, now + minLeadSeconds));
+}
+
+/** Wrap one adapter verification into a stamped check; adapter failure = unverified. */
+export async function checkSource(
+  url: string,
+  adapters: CreateAdapters,
+): Promise<SourceCheck> {
+  const trimmed = url.trim();
+  try {
+    const verified = await adapters.verifySource(trimmed);
+    return {
+      url: trimmed,
+      ok: verified.ok,
+      reason: verified.ok ? undefined : verified.reason,
+      checkedAt: adapters.now(),
+    };
+  } catch (error) {
+    // Phase 2 (dependency failure): a verification outage is a FAILED check,
+    // never an implicit pass. Fail closed.
+    return {
+      url: trimmed,
+      ok: false,
+      reason: adapterMessage(error),
+      checkedAt: adapters.now(),
+    };
+  }
+}
+
+/**
+ * Phase 3 (source-of-truth gate): no lifecycle stage past the draft may be
+ * reached without at least one VERIFIED public source of truth. The domain
+ * (checkResolvable) proves the source is a syntactically public http(s) URL;
+ * this adds the reachability proof on top. Returns the per-source checks for
+ * the wizard's chips on success, or an `unverified_source` error on failure.
+ */
+export async function requireVerifiedSource(
+  sources: readonly string[],
+  adapters: CreateAdapters,
+): Promise<Result<readonly SourceCheck[], CreateMarketError>> {
+  const nonEmpty = sources.map((source) => source.trim()).filter((s) => s.length > 0);
+  if (nonEmpty.length === 0) {
+    return err({ kind: "unverified_source", checks: [] });
+  }
+  const checks: SourceCheck[] = [];
+  for (const source of nonEmpty) {
+    checks.push(await checkSource(source, adapters));
+  }
+  if (checks.some((check) => check.ok)) return ok(checks);
+  return err({ kind: "unverified_source", checks });
+}
+
 // ─── Fixture adapters (stub; provenance "fixture") ───────────────────────────
 
 const DAY = 86_400;
@@ -392,8 +492,14 @@ export const fixtureCreateAdapters: CreateAdapters = {
     question: claim,
     resolutionRule: `Resolves to YES if "${claim}" is confirmed by a public source of truth by the resolution deadline; otherwise NO.`,
     sourcesOfTruth: ["https://fixture.example.com/source-of-truth"],
-    category: "Crypto",
-    startTime: BASE_NOW + 3 * DAY,
+    // Wire categories are lowercase slugs; the stub uses one so a draft is
+    // valid against both the live category list and this fallback.
+    category: "crypto",
+    // Start date defaults to TODAY (the earliest open the standard lead rule
+    // allows), anchored to the injectable clock — never a fixed future date,
+    // so a market can never open on a previous day. The wizard only lets the
+    // user move it forward.
+    startTime: BASE_NOW + MIN_STANDARD_LEAD_SECONDS,
     endTime: BASE_NOW + 30 * DAY,
     resolutionTime: BASE_NOW + 31 * DAY,
     imageUrl: "https://fixture.example.com/cover.png",
@@ -401,19 +507,42 @@ export const fixtureCreateAdapters: CreateAdapters = {
     eventInProgress: false,
   }),
 
-  fetchCategories: async () => [
-    "Crypto",
-    "Politics",
-    "Sports",
-    "Culture",
-    "Tech",
-    "Science",
-    "World",
-  ],
+  // The domain's closed category allowlist — used only when the live category
+  // read is unavailable. Same slug space the wire contract accepts.
+  fetchCategories: async () => [...MARKET_CATEGORY_SLUGS],
 
   // Stub upload: returns a placeholder public URL. The real flow uploads the
   // templated bytes and returns the storage URL (UNVERIFIED handshake).
   uploadImage: async () => "https://fixture.example.com/cover.png",
+
+  // Preview approximation of the server-side reachability check — NO network
+  // in the wizard. Mirrors the live verifier's rules (scheme allow-list, no
+  // localhost, no IP literals) so the preview experience matches production;
+  // the live adapter (lib/panta/source-verifier.ts) adds DNS + status checks.
+  verifySource: async (url) => {
+    const value = url.trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      return { ok: false, reason: "not a valid URL" };
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return { ok: false, reason: "must be a public http(s) URL" };
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host.includes(".") ||
+      host === "localhost" ||
+      host.endsWith(".localhost")
+    ) {
+      return { ok: false, reason: "host does not look like a public site" };
+    }
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
+      return { ok: false, reason: "IP-address sources are not allowed" };
+    }
+    return { ok: true };
+  },
 
   requestQuote: async () => ({
     createId: createIdSchema.parse("fixture-create-1"),

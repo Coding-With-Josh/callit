@@ -65,3 +65,24 @@ html.lenis body {
 .lenis.lenis-smooth [data-lenis-prevent] {
   overscroll-behavior: contain;
 }
+
+/* ── Privy login-modal theming ─────────────────────────────────────────────
+   Privy mounts its modal in the normal DOM (no shadow root) under
+   #privy-dialog. Colors, logo and copy come from the supported `appearance`
+   config in components/auth/privy-provider.tsx; this block only pins what
+   `appearance` cannot express — the Instrument Sans body font and the
+   rounded-corner scale that matches the app's cards/inputs.
+
+   These selectors are Privy internals: re-check them after a Privy upgrade.
+   The `--privy-*` custom properties inherit down the modal subtree, so
+   declaring the radius tokens on the dialog root reaches its descendants. */
+#privy-dialog,
+#privy-modal-content {
+  font-family: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+  --privy-border-radius-xs: 0.5rem;
+  --privy-border-radius-sm: 0.625rem;
+  --privy-border-radius-md: 0.75rem;
+  --privy-border-radius-mdlg: 0.875rem;
+  --privy-border-radius-lg: 1rem;
+  --privy-border-radius-full: 9999px;
+}
