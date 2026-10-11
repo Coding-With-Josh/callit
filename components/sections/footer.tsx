@@ -29,7 +29,7 @@ const GithubIcon = ({ className }: { className?: string }) => (
 
 export const Footer = () => {
   return (
-    <footer className="w-full border-t border-[#2D1C00]/5 bg-[#FFF2DD] px-4 py-6 md:px-12">
+    <footer className="w-full bottom-0 border-t border-[#2D1C00]/5 bg-[#FFF2DD] px-4 py-6 md:px-12">
       <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 md:flex-row">
         <p className="text-xs font-medium tracking-tight text-[#2D1C00]/60">
           Powered by Panta

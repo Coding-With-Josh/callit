@@ -1,27 +1,27 @@
 /**
- * auth/require-auth — auth guard helpers.
+ * require-auth — session-based auth guard for server routes.
  *
- * Owns: getSession + requireAuth (server-side). Maps failures to generic auth errors.
- * No UI imports.
+ * Returns ok with wallet/userId, or an error + HTTP status. Never throws.
  */
-import type { AuthError, Identity, Session } from '@/types/auth';
-import { getSession as readSession } from './session';
-import { err, ok, type Result } from '@/types/result';
+import type { NextRequest } from 'next/server';
+import { getSession } from './session';
 
-export async function getSession(): Promise<Session> {
-  return readSession();
-}
+export type AuthResult =
+  | { ok: true; wallet: string; userId?: string }
+  | { ok: false; error: string; status: number };
 
-export async function getIdentity(): Promise<Result<Identity, AuthError>> {
-  const s = await getSession();
-  if (s.identity) return ok(s.identity);
-  return err({ kind: 'unauthorized' });
-}
-
-/** Throws/returns shaped error; caller maps to HTTP. Use from server routes. */
-export async function requireAuth(): Promise<Identity> {
-  const r = await getIdentity();
-  if (r.ok) return r.value;
-  // Map to shape; let route layer translate to 401/403/503.
-  throw r.error;
+export async function requireAuthFromRequest(req: NextRequest): Promise<AuthResult> {
+  try {
+    const s = await getSession();
+    if (!s.identity) {
+      return { ok: false, error: 'unauthorized', status: 401 };
+    }
+    return {
+      ok: true,
+      wallet: s.identity.wallet,
+      userId: s.identity.userId,
+    };
+  } catch {
+    return { ok: false, error: 'unauthorized', status: 401 };
+  }
 }
