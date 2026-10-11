@@ -18,7 +18,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'signature required' }, { status: 400, headers: NO_STORE });
   }
   try {
-    const r = await reportTrade(ready.client, {
+    const r = await reportTrade({ client: ready.client }, {
       signature: b.signature,
       wallet: typeof b.wallet==='string'?b.wallet:undefined,
       marketId: typeof b.marketId==='string'?b.marketId:undefined,

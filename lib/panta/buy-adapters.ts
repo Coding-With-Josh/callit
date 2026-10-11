@@ -148,7 +148,7 @@ export async function verifyBuyOrder(
   return {
     status: r.value.status,
     marketId: r.value.marketId,
-    side: r.value.side,
+    side: r.value.side?.toUpperCase() as 'YES' | 'NO' | undefined,
     amountUsdcBase,
   };
 }

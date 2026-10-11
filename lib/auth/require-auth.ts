@@ -25,3 +25,14 @@ export async function requireAuthFromRequest(req: NextRequest): Promise<AuthResu
     return { ok: false, error: 'unauthorized', status: 401 };
   }
 }
+
+export async function requireAuth() {
+  const s = await getSession();
+  if (!s.identity) throw new Error('unauthorized');
+  return s.identity;
+}
+
+export async function getIdentity() {
+  const s = await getSession();
+  return s.identity ?? null;
+}

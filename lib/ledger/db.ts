@@ -19,7 +19,7 @@ import {
 } from '@/types/ledger';
 import { baseUnitsFromJson, baseUnitsJsonSchema, baseUnitsToJson, baseUnitsToUsdcDecimal, usdcDecimalToBaseUnits } from '@/types/money';
 import { unixSeconds, type UnixSeconds } from '@/types/time';
-import { txSignatureSchema } from '@/types/ids';
+import { txSignatureSchema, walletAddressSchema, marketIdSchema, orderIdSchema, quoteIdSchema } from '@/types/ids';
 
 export type LedgerDbError =
   | { readonly kind: 'invalid_transition'; readonly from: LedgerStatus; readonly to: LedgerStatus }
@@ -52,13 +52,13 @@ interface DbLedgerRow {
 function toDomain(row: DbLedgerRow): LedgerRow {
   return {
     signature: txSignatureSchema.parse(row.signature),
-    wallet: row.wallet,
-    marketId: row.market_id,
-    side: row.side,
-    amountUsdc: row.amount_usdc_dec,
-    source: { app: row.source_app, surface: row.source_surface },
-    orderId: row.order_id,
-    quoteId: row.quote_id,
+    wallet: walletAddressSchema.parse(row.wallet),
+    marketId: marketIdSchema.parse(row.market_id),
+    side: row.side.toLowerCase() as 'yes'|'no',
+    amountUsdc: row.amount_usdc_dec as any,
+    source: { app: row.source_app as any, surface: row.source_surface as any },
+    orderId: orderIdSchema.parse(row.order_id),
+    quoteId: quoteIdSchema.parse(row.quote_id),
     status: row.status,
     volumeClass: row.volume_class,
     createdAt: unixSeconds(Number(row.created_at)),
@@ -111,9 +111,9 @@ export async function insertBuilt(row: LedgerRow): Promise<void> {
         source_app, source_surface, order_id, quote_id, status, volume_class,
         created_at, updated_at, report_attempts, last_error
       ) VALUES (
-        ${row.signature}, ${row.wallet}, ${row.marketId}, ${row.side}, ${baseBig}, ${row.amountUsdc},
-        ${row.source.app}, ${row.source.surface}, ${row.orderId}, ${row.quoteId}, ${row.status},
-        ${row.volumeClass}, ${Number(row.createdAt)}, ${Number(row.updatedAt)}, ${row.reportAttempts},
+        ${row.signature}, ${row.wallet}, ${row.marketId}, ${row.side}, ${baseBig.toString()}, ${row.amountUsdc as any},
+        ${row.source.app as any}, ${row.source.surface as any}, ${row.orderId}, ${row.quoteId}, ${row.status},
+        ${row.volumeClass as any}, ${Number(row.createdAt)}, ${Number(row.updatedAt)}, ${row.reportAttempts},
         ${row.lastError ? JSON.stringify(row.lastError) : null}
       )
       ON CONFLICT (signature) DO NOTHING;
@@ -145,11 +145,11 @@ export async function transition(
   }
   const now = patch?.updatedAt ?? unixSeconds(Math.floor(Date.now() / 1000));
   const attempts = patch?.reportAttempts ?? current.report_attempts;
-  const errJson = patch?.lastError ? JSON.stringify(patch.lastError) : current.last_error;
+  const errJson = patch?.lastError ? JSON.stringify(patch.lastError) : (current.last_error as any);
   const res = await sql<DbLedgerRow>`
     UPDATE ledger
     SET status=${to}, updated_at=${Number(now)}, report_attempts=${attempts}, last_error=${errJson}
-    WHERE signature=${sig}
+    WHERE signature=${sig.toString()}
     RETURNING *;
   `;
   if (res.rows.length === 0) throw { kind: 'not_found', signature: sig } as LedgerDbError;
