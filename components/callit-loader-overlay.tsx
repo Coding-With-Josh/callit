@@ -17,7 +17,7 @@ import { useEffect, useState } from 'react';
 import { CallitLoader } from './callit-loader';
 
 /** How long the splash stays up (ms). Tune here. Must be >= the CSS timer. */
-export const MIN_VISIBLE_MS = 1000;
+export const MIN_VISIBLE_MS = 2000;
 
 export function CallitLoaderOverlay() {
   const [visible, setVisible] = useState(true);
