@@ -29,6 +29,7 @@
 
 import { Copy, Link2, LogOut, ShieldAlert, UserCircle, Wallet } from "lucide-react";
 import React from "react";
+import { AnimatePresence, motion } from "motion/react";
 import { usePrivy } from "@privy-io/react-auth";
 import { usePrivyGate } from "./use-privy-gate";
 import { useWallet } from "./use-wallet";
@@ -133,9 +134,11 @@ export const WalletPill = () => {
           <Wallet className="size-3.5 md:size-4" strokeWidth={2.5} />
           <span>Connect wallet</span>
         </button>
-        {modalMode && (
-          <AuthModal mode={modalMode} onClose={() => setModalMode(null)} />
-        )}
+        <AnimatePresence>
+          {modalMode && (
+            <AuthModal mode={modalMode} onClose={() => setModalMode(null)} />
+          )}
+        </AnimatePresence>
       </>
     );
   }
@@ -155,8 +158,16 @@ export const WalletPill = () => {
           </span>
           <UserCircle className="size-5" strokeWidth={2} />
         </button>
-        {open && (
-          <div className="absolute right-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD] shadow-xs">
+        <AnimatePresence>
+          {open && (
+            <motion.div
+              initial={{ opacity: 0, transform: "scale(0.97) translateY(-4px)" }}
+              animate={{ opacity: 1, transform: "scale(1) translateY(0px)" }}
+              exit={{ opacity: 0, transform: "scale(0.97) translateY(-4px)" }}
+              transition={{ duration: 0.16, ease: [0.23, 1, 0.32, 1] }}
+              className="absolute right-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD] shadow-xs"
+              style={{ transformOrigin: "top right" }}
+            >
             {address && (
               <button
                 type="button"
@@ -181,8 +192,7 @@ export const WalletPill = () => {
                   <span>Link wallet</span>
                 </button>
                 <p className="px-4 pb-2 pt-1 text-[11px] leading-snug text-[#2D1C00]/50">
-                  You need a Solana wallet to back markets. Connect your own —
-                  the same one you can use on X.
+                  You need a Solana wallet to back markets. Connect your wallet you would use to sign.
                 </p>
               </>
             )}
@@ -194,12 +204,15 @@ export const WalletPill = () => {
               <LogOut className="size-3.5" />
               <span>Disconnect</span>
             </button>
-          </div>
-        )}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
-      {modalMode && (
-        <AuthModal mode={modalMode} onClose={() => setModalMode(null)} />
-      )}
+      <AnimatePresence>
+        {modalMode && (
+          <AuthModal mode={modalMode} onClose={() => setModalMode(null)} />
+        )}
+      </AnimatePresence>
     </>
   );
 };

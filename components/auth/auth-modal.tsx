@@ -8,6 +8,15 @@
  * headless "SIWS implementation without Privy UIs" flow
  * (`useLoginWithSiws` / `useLinkWithSiws`).
  *
+ * Rendering: the modal is PORTALED to <body> (createPortal). It must NOT live
+ * inside the navbar/wallet-pill subtree: the navbar carries `backdrop-blur`,
+ * and any ancestor with backdrop-filter/filter/transform becomes the
+ * containing block for `position: fixed` descendants — that trapped the
+ * backdrop in the navbar instead of covering the viewport. Portal + z-[100]
+ * guarantees a true full-page overlay. Enter/exit animation is Motion:
+ * backdrop fade, panel spring pop, staggered wallet rows (reduced-motion
+ * aware — transform is dropped, opacity-only).
+ *
  * Boundary notes (Phase 1/3 of the auth model):
  *  - B1 connect (`standard:connect`): the wallet address comes from the
  *    extension's returned account — this modal NEVER accepts an address from
@@ -26,12 +35,14 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useLinkWithSiws, useLoginWithSiws, usePrivy } from '@privy-io/react-auth';
 import {
   type SolanaStandardWallet,
   useStandardWallets,
 } from '@privy-io/react-auth/solana';
 import { getBase64Decoder } from '@solana/kit';
+import { motion, useReducedMotion, type Variants } from 'motion/react';
 import { Loader2, ShieldAlert, Wallet, X } from 'lucide-react';
 import { useWallet } from './use-wallet';
 
@@ -65,6 +76,12 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
   // Ignore results after the modal is closed (late wallet approvals).
   const activeRef = useRef(true);
 
+  // Portal guard: only render once on the client (document.body exists).
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
   useEffect(() => {
     activeRef.current = true;
     return () => {
@@ -79,6 +96,59 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
+
+  // Motion: honour prefers-reduced-motion — fade only, no transform.
+  const reduce = useReducedMotion();
+
+  const panelVariants = useMemo<Variants>(
+    () =>
+      reduce
+        ? {
+            initial: { opacity: 0 },
+            animate: { opacity: 1, transition: { duration: 0.2, ease: 'easeOut' } },
+            exit: { opacity: 0, transition: { duration: 0.15, ease: 'easeIn' } },
+          }
+        : {
+            initial: { opacity: 0, transform: 'scale(0.96) translateY(12px)' },
+            animate: {
+              opacity: 1,
+              transform: 'scale(1) translateY(0px)',
+              transition: { type: 'spring', duration: 0.5, bounce: 0.15 },
+            },
+            exit: {
+              opacity: 0,
+              transform: 'scale(0.97) translateY(8px)',
+              transition: { duration: 0.2, ease: [0.4, 0, 1, 1] },
+            },
+          },
+    [reduce],
+  );
+
+  const listVariants = useMemo<Variants>(
+    () => ({
+      hidden: {},
+      visible: { transition: { staggerChildren: 0.05, delayChildren: 0.12 } },
+    }),
+    [],
+  );
+
+  const rowVariants = useMemo<Variants>(
+    () =>
+      reduce
+        ? {
+            hidden: { opacity: 0 },
+            visible: { opacity: 1, transition: { duration: 0.25, ease: 'easeOut' } },
+          }
+        : {
+            hidden: { opacity: 0, transform: 'translateY(10px)' },
+            visible: {
+              opacity: 1,
+              transform: 'translateY(0px)',
+              transition: { duration: 0.3, ease: [0.23, 1, 0.32, 1] },
+            },
+          },
+    [reduce],
+  );
 
   // Mainnet-capable wallets that can sign a message, Phantom/Backpack/Solflare
   // first, then the rest alphabetically. Fail-closed: wallets without
@@ -122,12 +192,26 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
     async (wallet: SolanaStandardWallet) => {
       if (flow.status === 'connecting' || flow.status === 'signing') return;
       setFlow({ status: 'connecting', walletName: wallet.name });
+      // Which async step threw — makes the next failure diagnosable.
+      let step = 'connect';
       try {
-        const connect = wallet.features['standard:connect'];
-        if (!connect) {
-          throw new Error('This wallet cannot connect here.');
+        // Some Solana wallets implement the older `solana:connect` feature
+        // instead of `standard:connect`; try both before failing closed.
+        const standardConnect = wallet.features['standard:connect'];
+        const solanaConnect = (
+          wallet.features as unknown as {
+            'solana:connect'?: {
+              connect: (input?: { silent?: boolean }) => Promise<{
+                accounts: readonly ConnectedAccount[];
+              }>;
+            };
+          }
+        )['solana:connect'];
+        const connectFeature = standardConnect ?? solanaConnect;
+        if (!connectFeature) {
+          throw new Error('This wallet cannot connect here (no connect feature).');
         }
-        const { accounts } = await connect.connect();
+        const { accounts } = await connectFeature.connect();
         const account = accounts[0];
         if (!account) {
           throw new Error('The wallet returned no account.');
@@ -138,13 +222,19 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
 
         if (!authenticated) {
           // Log in: the connected wallet IS the identity.
+          step = 'generate-siws-message';
           const message = await login.generateSiwsMessage({ address });
+          step = 'sign-message';
           const signature = await signSiws(wallet, account, message);
+          step = 'siws-login';
           await login.loginWithSiws({ message, signature });
         } else if (identityWallet && address !== identityWallet) {
           // Link a genuinely new wallet to the existing account.
+          step = 'generate-siws-message';
           const message = await link.generateSiwsMessage({ address });
+          step = 'sign-message';
           const signature = await signSiws(wallet, account, message);
+          step = 'siws-link';
           await link.linkWithSiws({ message, signature });
         }
         // authenticated + same address => reconnect only, no SIWS, no link.
@@ -152,7 +242,12 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
         if (activeRef.current) onClose();
       } catch (e) {
         if (!activeRef.current) return;
-        setFlow({ status: 'error', message: friendlyMessage(e) });
+        // Surface the REAL failure instead of hiding it: log the original
+        // error AND the step, and show the raw text in the UI so a wrong
+        // step (connect vs signMessage vs SIWS) is diagnosable, not a
+        // generic copy-paste.
+        console.error(`[auth-modal] step "${step}" failed:`, e);
+        setFlow({ status: 'error', message: friendlyMessage(e, step) });
       }
     },
     [
@@ -167,141 +262,158 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
   );
 
   const busy = flow.status === 'connecting' || flow.status === 'signing';
-  const busyName = flow.status === 'connecting' || flow.status === 'signing' ? flow.walletName : '';
+  const busyName =
+    flow.status === 'connecting' || flow.status === 'signing' ? flow.walletName : '';
 
-  return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-[#2D1C00]/50 p-4 backdrop-blur-sm"
+  if (!mounted) return null;
+
+  return createPortal(
+    <motion.div
+      // Backdrop: fade only (no transform) — it covers the viewport via
+      // inset-0; the portal keeps it out of the navbar's containing block.
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0 }}
+      transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-[#2D1C00]/50 p-6 backdrop-blur-sm"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div
+      <motion.div
         role="dialog"
         aria-modal="true"
         aria-label={mode === 'login' ? 'Connect wallet' : 'Link wallet'}
-        className="w-full max-w-sm overflow-hidden rounded-3xl border border-[#2D1C00]/10 bg-[#FFF2DD] shadow-2xl"
+        variants={panelVariants}
+        initial="initial"
+        animate="animate"
+        exit="exit"
+        className="w-full max-w-md overflow-hidden rounded-3xl border border-[#2D1C00]/10 bg-[#FFF2DD] shadow-2xl"
       >
-        <header className="flex items-center justify-between px-6 pt-6">
-          <svg
-            width="76"
-            height="24"
-            viewBox="0 0 76 24"
-            role="img"
-            aria-label="callit"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <text
-              x="0"
-              y="19"
-              fill="currentColor"
-              className="text-[#2D1C00]"
-              style={{ fontFamily: 'var(--font-tusker-9800)' }}
-              fontSize="21"
-              letterSpacing="-0.02em"
-            >
-              callit
-            </text>
-          </svg>
+        <header className="flex items-center justify-between px-7 pt-7">
+          <span className="font-tusker-8800 text-xl tracking-tight text-[#2D1C00]">
+            callit.
+          </span>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close"
-            className="cursor-pointer rounded-full p-1.5 text-[#2D1C00]/50 transition hover:bg-[#2D1C00]/5 hover:text-[#2D1C00]"
+            className="cursor-pointer rounded-full p-2 text-[#2D1C00]/50 transition hover:bg-[#2D1C00]/5 hover:text-[#2D1C00]"
           >
-            <X className="size-4" strokeWidth={2.5} />
+            <X className="size-4.5" strokeWidth={2.5} />
           </button>
         </header>
 
-        <div className="px-6 pt-4">
-          <h2 className="font-tusker-9800 text-2xl tracking-tight text-[#2D1C00]">
+        <div className="px-7 pt-5">
+          <h2 className="font-tusker-9800 text-[28px] leading-none tracking-tight text-[#2D1C00]">
             {mode === 'login' ? 'Connect your wallet' : 'Link a wallet'}
           </h2>
-          <p className="mt-1.5 text-sm leading-snug text-[#2D1C00]/60">
+          <p className="mt-3 text-[15px] leading-relaxed text-[#2D1C00]/60">
             {mode === 'login'
               ? 'Back the markets you believe in. Your wallet is your account — the same one you can use on X.'
               : 'Your account has no wallet yet. Add the one you use on X.'}
           </p>
         </div>
 
-        <div className="px-6 py-5">
+        <div className="px-7 pb-7 pt-6">
           {busy ? (
-            <div className="flex items-center gap-3 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-4 py-4">
-              <Loader2 className="size-5 animate-spin text-[#2D1C00]" strokeWidth={2.5} />
+            <div className="flex items-center gap-4 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-5 py-5">
+              <Loader2 className="size-6 animate-spin text-[#2D1C00]" strokeWidth={2.5} />
               <div>
-                <p className="text-sm font-medium tracking-tight text-[#2D1C00]">
-                  {flow.status === 'connecting' ? 'Waiting for your wallet…' : 'Confirm the sign-in…'}
+                <p className="text-[15px] font-medium tracking-tight text-[#2D1C00]">
+                  {flow.status === 'connecting'
+                    ? 'Waiting for your wallet…'
+                    : 'Confirm the sign-in…'}
                 </p>
-                <p className="text-xs text-[#2D1C00]/50">
-                  {busyName} — {flow.status === 'connecting' ? 'approve the connection' : 'sign the message'}
+                <p className="mt-0.5 text-[13px] text-[#2D1C00]/50">
+                  {busyName} —{' '}
+                  {flow.status === 'connecting'
+                    ? 'approve the connection'
+                    : 'sign the message'}
                 </p>
               </div>
             </div>
           ) : candidates.length === 0 ? (
-            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-4 py-6 text-center">
-              <ShieldAlert className="size-5 text-[#2D1C00]/50" strokeWidth={2} />
-              <p className="text-sm leading-snug text-[#2D1C00]/70">
+            <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-5 py-8 text-center">
+              <ShieldAlert className="size-6 text-[#2D1C00]/50" strokeWidth={2} />
+              <p className="text-[15px] leading-snug text-[#2D1C00]/70">
                 {walletsReady
                   ? 'No compatible wallets found. Install Phantom, Backpack, or Solflare, then refresh.'
                   : 'Checking for wallets…'}
               </p>
             </div>
           ) : (
-            <div className="flex flex-col gap-2">
+            <motion.div
+              variants={listVariants}
+              initial="hidden"
+              animate="visible"
+              className="flex flex-col gap-2.5"
+            >
               {candidates.map((wallet) => (
-                <button
+                <motion.button
                   key={wallet.name}
                   type="button"
+                  variants={rowVariants}
                   onClick={() => void handleSelect(wallet)}
-                  className="group flex w-full cursor-pointer items-center gap-3 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-4 py-3 text-left transition hover:border-[#2D1C00]/25 hover:bg-[#2D1C00]/5"
+                  className="group flex w-full cursor-pointer items-center gap-4 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-5 py-4 text-left transition hover:border-[#2D1C00]/25 hover:bg-[#2D1C00]/5"
                 >
                   {/* eslint-disable-next-line @next/next/no-img-element -- wallet.icon is a data: URI from the extension itself */}
                   <img
                     src={wallet.icon}
                     alt=""
-                    className="size-8 rounded-lg"
-                    width={32}
-                    height={32}
+                    className="size-11 rounded-xl"
+                    width={44}
+                    height={44}
                   />
                   <span className="flex-1">
-                    <span className="block text-sm font-semibold tracking-tight text-[#2D1C00]">
+                    <span className="block text-[15px] font-semibold tracking-tight text-[#2D1C00]">
                       {wallet.name}
                     </span>
                     {PREFERRED_WALLETS.includes(wallet.name) && (
-                      <span className="block text-[11px] text-[#2D1C00]/40">Recommended</span>
+                      <span className="mt-0.5 block text-xs text-[#2D1C00]/40">
+                        Recommended
+                      </span>
                     )}
                   </span>
-                  <Wallet className="size-4 text-[#2D1C00]/30 transition group-hover:text-[#2D1C00]" strokeWidth={2} />
-                </button>
+                  <Wallet
+                    className="size-5 text-[#2D1C00]/30 transition group-hover:text-[#2D1C00]"
+                    strokeWidth={2}
+                  />
+                </motion.button>
               ))}
-            </div>
+            </motion.div>
           )}
 
           {flow.status === 'error' && (
             <p
               role="alert"
-              className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-xs leading-snug text-red-800"
+              className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-[13px] leading-snug text-red-800"
             >
               {flow.message}
             </p>
           )}
 
-          <p className="mt-4 text-center text-[11px] tracking-tight text-[#2D1C00]/35">
+          <p className="mt-6 border-t border-[#2D1C00]/10 pt-4 text-center text-xs tracking-tight text-[#2D1C00]/40">
             Authentication by Privy · your keys stay in your wallet
           </p>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>,
+    document.body,
   );
 }
 
-function friendlyMessage(e: unknown): string {
-  const msg = e instanceof Error ? e.message : '';
+function friendlyMessage(e: unknown, step: string): string {
+  const msg = e instanceof Error ? e.message : String(e);
   if (/reject|declined|cancelled|cancel/i.test(msg)) {
     return 'Connection was declined in your wallet.';
   }
-  if (/siws|sign in with solana|not enabled/i.test(msg)) {
+  if (/siws|sign in with solana|not enabled|not available|not configured/i.test(msg)) {
     return 'Solana login is not enabled for this app yet — check the Privy dashboard (Wallet auth).';
   }
-  return 'Something went wrong connecting your wallet. Try again.';
+  // Include the raw message and the failing step so the real failure is
+  // visible, not masked.
+  return msg
+    ? `Something went wrong at "${step}": ${msg}`
+    : `Something went wrong at "${step}". Try again.`;
 }
