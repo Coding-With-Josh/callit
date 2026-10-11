@@ -1,6 +1,8 @@
 /**
  * wallet-pill — auth state pill (client island).
- * Signed out: shows "Connect" (disabled while the Privy SDK initialises).
+ * Signed out: shows "Connect wallet" once the SDK is ready; while the Privy SDK
+ * is still initialising the button shows a spinner and "Setting up…" (disabled +
+ * aria-busy) so the init window reads as progress, not a dead button.
  * Signed in, wallet linked: shows truncated address + dot + menu.
  * Signed in, NO wallet: shows "Link wallet" affordance — with embedded wallets
  * disabled (see privy-provider.tsx), a wallet-less account cannot sign, so the
@@ -27,7 +29,7 @@
  */
 "use client";
 
-import { Copy, Link2, LogOut, ShieldAlert, UserCircle, Wallet } from "lucide-react";
+import { Copy, Link2, Loader2, LogOut, ShieldAlert, UserCircle, Wallet } from "lucide-react";
 import React from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { usePrivy } from "@privy-io/react-auth";
@@ -131,8 +133,16 @@ export const WalletPill = () => {
           aria-label="Connect wallet"
           className="flex items-center gap-2 rounded-full border border-[#2D1C00]/25 bg-[#FFF2DD]/90 px-3 py-2 text-xs font-medium tracking-tight text-[#2D1C00] backdrop-blur transition hover:scale-102 active:scale-98 cursor-pointer disabled:cursor-wait disabled:opacity-60 md:px-4 md:py-2.5 md:text-sm"
         >
-          <Wallet className="size-3.5 md:size-4" strokeWidth={2.5} />
-          <span>Connect wallet</span>
+          {ready ? (
+            <Wallet className="size-3.5 md:size-4" strokeWidth={2.5} />
+          ) : (
+            <Loader2
+              className="size-3.5 md:size-4 animate-spin"
+              strokeWidth={2.5}
+              aria-hidden
+            />
+          )}
+          <span>{ready ? "Connect wallet" : "Setting up…"}</span>
         </button>
         <AnimatePresence>
           {modalMode && (

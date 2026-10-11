@@ -370,7 +370,14 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
             </div>
           ) : candidates.length === 0 ? (
             <div className="flex flex-col items-center gap-3 rounded-2xl border border-[#2D1C00]/10 bg-[#FFF2DD]/60 px-5 py-8 text-center">
-              <ShieldAlert className="size-6 text-[#2D1C00]/50" strokeWidth={2} />
+              {walletsReady ? (
+                <ShieldAlert className="size-6 text-[#2D1C00]/50" strokeWidth={2} />
+              ) : (
+                <Loader2
+                  className="size-6 animate-spin text-[#2D1C00]/50"
+                  strokeWidth={2}
+                />
+              )}
               <p className="text-[15px] leading-snug text-[#2D1C00]/70">
                 {walletsReady
                   ? 'No compatible wallets found. Install Phantom, Backpack, or Solflare, then refresh.'

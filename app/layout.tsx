@@ -3,6 +3,7 @@ import { Suspense } from "react";
 import { Geist_Mono, Google_Sans_Flex } from "next/font/google";
 import localFont from "next/font/local";
 import { SmoothScroll } from "@/components/smooth-scroll";
+import { CallitLoaderOverlay } from "@/components/callit-loader-overlay";
 import { CallitPrivyProvider } from "@/components/auth/privy-provider";
 import { jsonLd } from "@/lib/seo/jsonld";
 import { INDEXABLE_ROBOTS } from "@/lib/seo/robots";
@@ -217,6 +218,10 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <Suspense fallback={null}>
           <SmoothScroll />
         </Suspense>
+        {/* First-load splash: owns its own timer so the loader is actually seen
+            (a Suspense fallback can't hold itself on screen). Sits above the
+            navbar but below the auth modal — see callit-loader-overlay.tsx. */}
+        <CallitLoaderOverlay />
       </body>
     </html>
   );

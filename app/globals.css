@@ -86,3 +86,81 @@ html.lenis body {
   --privy-border-radius-lg: 1rem;
   --privy-border-radius-full: 9999px;
 }
+
+/* ── Callit page loader ─────────────────────────────────────────────────────
+   The "wave" text-loader technique (transparent fill + `background-clip: text`
+   swept by two radial gradients) retargeted to the brand: the `callit.`
+   wordmark in Tusker 9800, ink on cream. Pure CSS, no JS — it is the route
+   `loading.tsx` fallback, so it must be cheap and side-effect free.
+
+   Fail-safe (Phase 2): the element's DEFAULT is a plain, visible ink wordmark.
+   The transparent fill / outline / gradient / animation only switch on inside
+   @supports, so a browser without `background-clip: text` shows readable text
+   instead of an invisible one. `prefers-reduced-motion` drops the sweep. */
+.callit-loader {
+  width: fit-content;
+  font-family: var(--font-tusker-9800), ui-sans-serif, system-ui, sans-serif;
+  font-size: clamp(2.75rem, 12vw, 6rem);
+  line-height: 1.5;
+  font-weight: 900;
+  color: #2d1c00; /* fail-safe: visible even if the effect below never applies */
+}
+
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+  .callit-loader {
+    color: transparent;
+    -webkit-text-stroke: 0.025em #2d1c00;
+    background-image:
+      radial-gradient(1.13em at 50% 1.6em, #2d1c00 99%, transparent 101%),
+      radial-gradient(1.13em at 50% -0.8em, transparent 99%, #2d1c00 101%);
+    background-position: calc(50% - 1.6em) 0, 50% 0.8em;
+    background-size: 3.2em 100%;
+    background-repeat: repeat, repeat-x;
+    -webkit-background-clip: text;
+    background-clip: text;
+    animation: callit-loader-sweep 2s linear infinite;
+  }
+}
+
+@keyframes callit-loader-sweep {
+  to {
+    background-position: calc(50% + 1.6em) 0, calc(50% + 3.2em) 0.8em;
+  }
+}
+
+/* Reduced motion: no sweep — a static, solid ink wordmark (Phase 2). */
+@media (prefers-reduced-motion: reduce) {
+  .callit-loader {
+    color: #2d1c00;
+    -webkit-text-stroke: 0;
+    background-image: none;
+    animation: none;
+  }
+}
+
+/* ── First-load splash timer (components/callit-loader-overlay.tsx) ─────────
+   Hides the overlay on a CSS timer, independent of JS. This is the load-bearing
+   hide: if the client never hydrates, the `setTimeout` in the component never
+   runs, and without this rule the full-screen cover would trap the page. The
+   component's timeout (900ms) matches the total here (650ms + 250ms) and only
+   removes the node. `visibility: hidden` (not just opacity) also drops it from
+   the a11y tree and stops it receiving pointer events. */
+.callit-boot-overlay {
+  animation: callit-boot-hide 250ms ease-out 650ms forwards;
+}
+
+@keyframes callit-boot-hide {
+  to {
+    opacity: 0;
+    visibility: hidden;
+  }
+}
+
+/* Reduced motion: still hide (never trap the page), but instantly at the same
+   total delay — no fade. */
+@media (prefers-reduced-motion: reduce) {
+  .callit-boot-overlay {
+    animation-duration: 0ms;
+    animation-delay: 900ms;
+  }
+}
