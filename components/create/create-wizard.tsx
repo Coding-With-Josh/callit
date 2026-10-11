@@ -142,32 +142,60 @@ const SignStepButton = () => {
 /**
  * The generated cover, as an image. Fetches the Tusker face once (cached in
  * `loadCoverFontCss`) and embeds it in the SVG so the headline renders in the
- * house face inside an `<img>`; until it resolves — or if the fetch fails — the
- * cover renders in the `system-ui` fallback rather than not at all.
+ * house face inside an `<img>`.
+ *
+ * No system-font flash: until the font promise settles we render a skeleton
+ * instead of the fallback-face card, so the correctly-fonted card is the first
+ * thing the user sees. The card then fades in — never a sharp swap. If the
+ * fetch fails the promise still resolves (to `""`) and the card fades in on
+ * the `system-ui` fallback rather than leaving a permanent skeleton.
  */
 const CoverPreview = ({ question }: { question: string }) => {
-  const [fontCss, setFontCss] = useState("");
+  // null = still waiting for the embedded font; "" = settled (possibly failed).
+  const [fontCss, setFontCss] = useState<string | null>(null);
+  // Flipped after one painted frame at opacity-0, so the transition runs.
+  const [revealed, setRevealed] = useState(false);
+
   useEffect(() => {
     let alive = true;
     void loadCoverFontCss().then((css) => {
-      if (alive) setFontCss(css);
+      if (!alive) return;
+      setFontCss(css);
+      requestAnimationFrame(() => {
+        if (alive) setRevealed(true);
+      });
     });
     return () => {
       alive = false;
     };
   }, []);
+
   // Memoised: the data URI embeds the whole font (~48KB base64), so it must not
   // be rebuilt on every render.
   const src = useMemo(
-    () => templatedCoverDataUri(question, fontCss),
+    () => templatedCoverDataUri(question, fontCss ?? ""),
     [question, fontCss],
   );
+
+  if (fontCss === null) {
+    // Cream block echoing the card's ground; the figure's rounded ring clips
+    // it to the same shape as the finished card, so only opacity changes.
+    return (
+      <div
+        aria-hidden="true"
+        className="aspect-[1200/630] w-full animate-pulse bg-[#FFF2DD]"
+      />
+    );
+  }
+
   return (
     // eslint-disable-next-line @next/next/no-img-element -- SVG data URI, not a remote/optimisable asset; next/image adds nothing here.
     <img
       src={src}
       alt="Preview of the generated market cover"
-      className="aspect-[1200/630] w-full object-cover"
+      className={`aspect-[1200/630] w-full object-cover opacity-0 motion-safe:transition-opacity motion-safe:duration-500 ease-out ${
+        revealed ? "opacity-100" : ""
+      }`}
     />
   );
 };
