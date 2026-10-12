@@ -25,7 +25,7 @@
 
 /** Every way the session mint can fail, other than succeeding. */
 export type SessionMintFailureKind =
-  | 'no-token' // no identity token was readable locally; the route was never called
+  | 'no-token' // no Privy access token was readable locally; the route was never called
   | 'rejected' // the route was called with a token and refused it (400/401)
   | 'no-wallet' // 403: authenticated, but no linked Solana wallet to bind
   | 'unavailable' // 503: identity provider (Privy) unreachable

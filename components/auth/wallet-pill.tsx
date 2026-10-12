@@ -32,10 +32,15 @@
 import { Copy, Link2, Loader2, LogOut, ShieldAlert, UserCircle, Wallet } from "lucide-react";
 import React from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { usePrivy, useIdentityToken } from "@privy-io/react-auth";
+import { usePrivy } from "@privy-io/react-auth";
 import { usePrivyGate } from "./use-privy-gate";
 import { useWallet } from "./use-wallet";
-import { clearServerSession, mirrorIdentityToken, mintSession } from "./session-client";
+import {
+  clearServerSession,
+  mirrorAccessToken,
+  mintSession,
+  registerAccessTokenProvider,
+} from "./session-client";
 import { AuthModal, type AuthModalMode } from "./auth-modal";
 
 function truncateAddress(addr: string): string {
@@ -44,10 +49,9 @@ function truncateAddress(addr: string): string {
 }
 
 export const WalletPill = () => {
-  const { authenticated, logout } = usePrivy();
+  const { authenticated, logout, getAccessToken } = usePrivy();
   const { ready, unavailable } = usePrivyGate();
   const { address } = useWallet();
-  const { identityToken } = useIdentityToken();
 
   const [open, setOpen] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
@@ -75,12 +79,35 @@ export const WalletPill = () => {
     }
   }, [copied]);
 
-  // Mirror the SDK's cached identity token into the session client, so a mint
-  // cannot fail just because `getIdentityToken()`'s internal refresh call did.
-  // No network, no throw — pure read of a value the SDK already holds.
+  // Give the session client a live getter for the Privy ACCESS token. The mint
+  // verifies this token server-side against the app's Privy verification key;
+  // the identity token is NOT used, because its only source is Privy's
+  // rate-limited `/users/me` (see session-client.ts).
   React.useEffect(() => {
-    mirrorIdentityToken(identityToken ?? null);
-  }, [identityToken]);
+    registerAccessTokenProvider(getAccessToken);
+    return () => registerAccessTokenProvider(null);
+  }, [getAccessToken]);
+
+  // Keep the cheap mirror fresh, so a mint usually costs no token read at all.
+  // Fail-closed: signed out means an explicitly empty mirror, never a stale one.
+  React.useEffect(() => {
+    let cancelled = false;
+    if (!authenticated) {
+      mirrorAccessToken(null);
+      return;
+    }
+    void getAccessToken()
+      .then((token) => {
+        if (!cancelled) mirrorAccessToken(token);
+      })
+      .catch(() => {
+        // A failed read is not an empty token — leave the mirror alone and let
+        // the mint's live getter make the attempt and report the real kind.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticated, address, getAccessToken]);
 
   // Server session mint: on logout reset; on (authenticated, wallet) transition
   // mint once per wallet. This is what makes requireAuth() real.
@@ -88,10 +115,8 @@ export const WalletPill = () => {
   //
   // The ref records SUCCESS only, so a transient failure is retried on the next
   // render/action rather than being permanent. Deliberately NO retry loop here:
-  // `mintSession` already bounds itself, and an outer loop multiplied the calls
-  // into Privy's rate-limited token refresh, causing the 429s that made minting
-  // fail outright. `identityToken` is a dependency so that the cheap, cached
-  // token is used as soon as the SDK exposes it.
+  // `mintSession` already bounds itself, and an outer loop multiplied calls into
+  // Privy's rate-limited endpoints, which is what made minting fail outright.
   React.useEffect(() => {
     if (!authenticated) {
       lastMintedWallet.current = "";
@@ -108,7 +133,7 @@ export const WalletPill = () => {
     return () => {
       cancelled = true;
     };
-  }, [authenticated, address, identityToken]);
+  }, [authenticated, address]);
 
   const handleConnect = () => {
     // Guarded: never open the flow before the SDK is ready (that path no-ops).
