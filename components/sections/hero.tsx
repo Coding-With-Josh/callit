@@ -33,13 +33,21 @@ export const Hero = () => {
           `mt-6` lives here so the 24px gap below the subtitle stays identical on
           desktop without double spacing when stacked. */}
       <div className="mt-6 flex w-full flex-col items-center justify-center gap-4 px-6 md:max-w-xl md:flex-row md:gap-3">
-        <Link
-          href="/create"
-          className="flex w-full max-w-sm items-center justify-center whitespace-nowrap rounded-full bg-[#2D1C00] px-6 py-3 font-sans font-medium tracking-tight text-[#FFF2DD] transition-all hover:scale-102 active:scale-98 cursor-pointer md:w-auto md:max-w-none"
-        >
-          <PlusCircle className="mr-2 size-5" strokeWidth={2.5} />
-          Create a market
-        </Link>
+        <div className="relative">
+          <Link
+            href="/create"
+            onClick={(e) => e.preventDefault()}
+            tabIndex={-1}
+            aria-disabled="true"
+            className="flex w-full max-w-sm items-center justify-center whitespace-nowrap rounded-full bg-[#2D1C00] px-6 py-3 font-sans font-medium tracking-tight text-[#FFF2DD] transition-all hover:scale-102 active:scale-98 cursor-pointer md:w-auto md:max-w-none pointer-events-none opacity-60"
+          >
+            <PlusCircle className="mr-2 size-5" strokeWidth={2.5} />
+            Create a market
+          </Link>
+          {/* <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+            <span className="bg-[#2D1C00]/10 text-[#FFF2DD] px-4 py-1 rounded-full text-sm font-sans font-medium tracking-tight">Coming soon</span>
+          </div> */}
+        </div>
         {/* Anchor + smooth scroll: Lenis if running, native jump otherwise.
             href="/#browse" also works cross-page and with JS disabled;
             scroll={false} lets SmoothScroll center the section instead of

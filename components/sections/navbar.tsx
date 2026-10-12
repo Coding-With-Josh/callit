@@ -22,15 +22,21 @@ export const Navbar = () => {
 
       {/* Right: Create + Wallet pill */}
       <div className="flex w-1/3 items-center justify-end gap-2 md:gap-3">
-        <Link href="/create">
-          <button
-            aria-label="Create a market"
-            className="flex items-center justify-center rounded-full bg-[#2D1C00] px-3 py-2.5 font-sans text-xs font-medium tracking-tight text-[#FFF2DD] transition hover:scale-102 active:scale-98 cursor-pointer md:px-5 md:text-sm"
-          >
-            <PlusCircle className="mr-0 md:mr-2 size-4 md:size-5" strokeWidth={2.5} />
-            <span className="hidden md:inline">Create a market</span>
-          </button>
-        </Link>
+        <div className="relative">
+          <Link href="/create"           onClick={(e) => e.preventDefault()}
+            tabIndex={-1}
+            aria-disabled="true">
+            <button
+              aria-label="Create a market"
+              disabled
+              className="flex items-center justify-center rounded-full bg-[#2D1C00] px-3 py-2.5 font-sans text-xs font-medium tracking-tight text-[#FFF2DD] transition cursor-not-allowed opacity-60 md:px-5 md:text-sm"
+            >
+              <PlusCircle className="mr-0 md:mr-2 size-4 md:size-5" strokeWidth={2.5} />
+              <span className="hidden md:inline">Create a market</span>
+            </button>
+          </Link>
+          
+        </div>
         <WalletPill />
       </div>
     </div>
