@@ -19,7 +19,7 @@
 'use client';
 
 import { mintSession } from './session-client';
-import type { SessionMintFailureKind } from '@/lib/auth/session-mint';
+import type { SessionFailureKind } from '@/lib/auth/session-mint';
 
 export type AuthedJsonResult =
   | { readonly ok: true; readonly data: unknown }
@@ -27,12 +27,14 @@ export type AuthedJsonResult =
       readonly ok: false;
       readonly status: number;
       /**
-       * Present ONLY when the request 401'd and the session mint that was
-       * supposed to fix it also failed. A bare 401 is indistinguishable from
-       * "you are signed out", which is a lie when the wallet pill is showing a
-       * connected wallet — this field is how a caller tells those apart.
+       * Present ONLY when a 401 could not be explained as "you are signed out":
+       * either the session mint that was supposed to fix it also failed, or it
+       * reported success and the request was *still* anonymous. A bare 401 is
+       * indistinguishable from "signed out", which is a lie when the wallet pill
+       * is showing a connected wallet — this field is how a caller tells them
+       * apart. Fixed enum; never response body text.
        */
-      readonly sessionMintFailed?: SessionMintFailureKind;
+      readonly sessionFailure?: SessionFailureKind;
     };
 
 async function requestJson(
@@ -63,6 +65,12 @@ async function requestJson(
 /**
  * Same-origin JSON request; on a 401, mint a fresh server session and retry
  * exactly once. `status: 0` means the request never completed (offline/proxy).
+ *
+ * A 401 that survives the retry is NOT reported as a plain 401: either the mint
+ * failed (`sessionFailure` = the mint's own kind) or the mint succeeded and the
+ * session still was not accepted (`sessionFailure: 'not-persisted'`). Both are
+ * more specific than "you are signed out", which is what a bare 401 implies and
+ * what left a connected user staring at "Connect your wallet".
  */
 export async function authedJson(
   path: string,
@@ -73,10 +81,12 @@ export async function authedJson(
   if (first.ok || first.status !== 401) return first;
   const minted = await mintSession();
   if (minted.status !== 'ok') {
-    // The retry cannot help if there is no session to retry with. Report the
-    // mint's own failure so the caller can say what actually went wrong instead
-    // of "signed out" — the Phase 3 failure this field exists to close.
-    return { ok: false, status: first.status, sessionMintFailed: minted.status };
+    // The retry cannot help if there is no session to retry with.
+    return { ok: false, status: first.status, sessionFailure: minted.status };
   }
-  return requestJson(path, method, init.body);
+  const retried = await requestJson(path, method, init.body);
+  if (retried.ok || retried.status !== 401) return retried;
+  // The mint said it landed, yet we are still anonymous. Distinct from a mint
+  // failure, and distinct from "signed out" — name it instead of guessing.
+  return { ok: false, status: retried.status, sessionFailure: 'not-persisted' };
 }

@@ -15,7 +15,6 @@ import { getIdentityToken } from '@privy-io/react-auth';
 import type { SessionMintFailureKind } from '@/lib/auth/session-mint';
 
 export type SessionMintStatus = 'ok' | SessionMintFailureKind;
-
 export interface SessionMintResult {
   readonly status: SessionMintStatus;
 }
@@ -67,7 +66,7 @@ async function attemptMint(): Promise<SessionMintResult> {
   // Fall back to the mirrored store value when the refresh path gave us nothing:
   // a failed refresh must not cost a user who is demonstrably signed in.
   if (!token) token = mirroredIdentityToken;
-  if (!token) return { status: 'unauthorized' };
+  if (!token) return { status: 'no-token' };
 
   let res: Response;
   try {
@@ -85,23 +84,23 @@ async function attemptMint(): Promise<SessionMintResult> {
   if (res.ok) return { status: 'ok' };
   if (res.status === 403) return { status: 'no-wallet' };
   if (res.status === 503) return { status: 'unavailable' };
-  return { status: 'unauthorized' };
+  return { status: 'rejected' };
 }
 
 /**
  * Mint (or refresh) the signed server session for the current Privy user.
  *
- * Retries ONLY on `unauthorized` (a missing/not-yet-readable token). A 403
- * (no linked wallet), a 503 (provider down) or a network failure will not change
- * in 250ms, so those return immediately and the caller can report them.
+ * Retries ONLY on `no-token` (a token that is not readable yet). A `rejected`
+ * token, a 403, a 503 or a network failure will not change in 250ms, so those
+ * return immediately and the caller can report them.
  */
 export async function mintSession(): Promise<SessionMintResult> {
   let result = await attemptMint();
-  if (result.status !== 'unauthorized') return result;
+  if (result.status !== 'no-token') return result;
   for (const wait of MINT_BACKOFF_MS) {
     await new Promise((resolve) => setTimeout(resolve, wait));
     result = await attemptMint();
-    if (result.status !== 'unauthorized') return result;
+    if (result.status !== 'no-token') return result;
   }
   return result;
 }
