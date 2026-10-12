@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   CreateClientError,
   describeCreateClientError,
+  describeSourceCheckError,
   parseCreateBuild,
   parseCreateQuote,
   parseSourceVerdict,
@@ -60,11 +61,37 @@ describe('parseCreateBuild', () => {
 });
 
 describe('parseSourceVerdict', () => {
-  it('passes through a verifier verdict', () => {
-    expect(parseSourceVerdict({ ok: true })).toEqual({ ok: true });
-    expect(parseSourceVerdict({ ok: false, reason: 'source could not be reached' })).toEqual({
+  it('passes through a confirmed verifier verdict', () => {
+    expect(parseSourceVerdict({ ok: true, confidence: 'confirmed' })).toEqual({
+      ok: true,
+      confidence: 'confirmed',
+    });
+    expect(
+      parseSourceVerdict({ ok: false, reason: 'source could not be reached' }),
+    ).toEqual({
       ok: false,
       reason: 'source could not be reached',
+    });
+  });
+
+  it('keeps an unconfirmed verdict unconfirmed, with fixed copy', () => {
+    // Phase 3: a bot-blocked host is a pass, but it must never be upgraded to
+    // "confirmed" on its way through the client.
+    expect(
+      parseSourceVerdict({
+        ok: true,
+        confidence: 'unconfirmed',
+        reason: 'source responded with HTTP 403 — the site refuses automated checks',
+      }),
+    ).toEqual({
+      ok: true,
+      confidence: 'unconfirmed',
+      reason: 'source responded with HTTP 403 — the site refuses automated checks',
+    });
+    expect(parseSourceVerdict({ ok: true, confidence: 'unconfirmed' })).toEqual({
+      ok: true,
+      confidence: 'unconfirmed',
+      reason: 'the site refuses automated checks, so this page could not be read',
     });
   });
 
@@ -78,6 +105,44 @@ describe('parseSourceVerdict', () => {
       ok: false,
       reason: 'The source check returned an unreadable result.',
     });
+    // An `ok` verdict with NO tier is refused rather than assumed confirmed:
+    // assuming would silently skip the attestation the user is meant to give.
+    expect(parseSourceVerdict({ ok: true })).toEqual({
+      ok: false,
+      reason: 'The source check returned an unreadable result.',
+    });
+    expect(parseSourceVerdict({ ok: true, confidence: 'maybe' })).toEqual({
+      ok: false,
+      reason: 'The source check returned an unreadable result.',
+    });
+    // A hostile route must not be able to push an unbounded string into the UI.
+    expect(
+      parseSourceVerdict({ ok: false, reason: 'x'.repeat(301) }),
+    ).toEqual({
+      ok: false,
+      reason: 'The source check returned an unreadable result.',
+    });
+  });
+});
+
+describe('describeSourceCheckError', () => {
+  it('names the failure per status and never echoes an upstream string', () => {
+    const statuses = [0, 400, 401, 403, 404, 429, 500, 502, 503, 504];
+    for (const status of statuses) {
+      const message = describeSourceCheckError(status);
+      expect(message.length).toBeGreaterThan(0);
+      expect(message).not.toContain(String(status));
+    }
+    // The distinction that was previously invisible: a missing route in dev.
+    expect(describeSourceCheckError(404)).toBe(
+      'Source checking is not available right now.',
+    );
+    expect(describeSourceCheckError(0)).toBe(
+      'Source checking could not be reached.',
+    );
+    expect(describeSourceCheckError(401)).toBe(
+      'Sign in again to check sources.',
+    );
   });
 });
 

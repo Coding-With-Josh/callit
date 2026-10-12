@@ -5,6 +5,10 @@
  * credentials, localhost, IP literals, private DNS targets, redirects into
  * blocked targets, timeouts, non-2xx and redirect loops all fail; and the
  * result can never contain response content.
+ *
+ * Also pins the two-tier policy: 403/429 (bot management / throttling) are a
+ * pass marked `unconfirmed` — never a `confirmed` one, and never a rejection —
+ * while 401/405/407 and 5xx stay hard failures.
  */
 import { describe, it, expect } from 'vitest';
 import { createSourceVerifier } from './source-verifier';
@@ -30,6 +34,7 @@ describe('source verifier', () => {
   it('verifies a reachable public https URL', async () => {
     await expect(verifier()('https://example.com/source')).resolves.toEqual({
       ok: true,
+      confidence: 'confirmed',
     });
   });
 
@@ -111,6 +116,61 @@ describe('source verifier', () => {
     expect(result.reason).toContain('404');
   });
 
+  it('passes a bot-blocked public host as UNCONFIRMED, never as verified', async () => {
+    // Cloudflare-class bot management answers 403 to EVERY non-browser fetch —
+    // confirmed live against defillama.com/chain/Solana and
+    // coingecko.com/en/coins/solana, where no User-Agent/Accept permutation
+    // helped. The host is public and answered, so it is not a rejection; but the
+    // page itself was never read, so it must not claim confirmation either.
+    const v = verifier({
+      fetchImpl: (async () => new Response('blocked', { status: 403 })) as typeof fetch,
+    });
+    const result = await v('https://defillama.com/chain/Solana');
+    expect(result.ok).toBe(true);
+    expect(result.confidence).toBe('unconfirmed');
+    expect(result.reason).toContain('403');
+    // Fixed copy plus the tier — never anything read off the response.
+    expect(Object.keys(result).sort()).toEqual(['confidence', 'ok', 'reason']);
+    expect(result.reason).not.toContain('blocked');
+  });
+
+  it('passes a throttled public host as unconfirmed', async () => {
+    const v = verifier({
+      fetchImpl: (async () => new Response('slow down', { status: 429 })) as typeof fetch,
+    });
+    const result = await v('https://example.com/rate-limited');
+    expect(result.ok).toBe(true);
+    expect(result.confidence).toBe('unconfirmed');
+  });
+
+  it('keeps credentials-required and GET-refused statuses as hard failures', async () => {
+    // 401/405/407 are NOT bot-blocking: a resolver fetching the source hits the
+    // same wall, so a page nobody can read is not a usable source. Deliberately
+    // narrower than "any 4xx", and deliberately not cleared by attestation.
+    for (const status of [401, 405, 407]) {
+      const v = verifier({
+        fetchImpl: (async () => new Response('no', { status })) as typeof fetch,
+      });
+      const result = await v('https://example.com/locked');
+      expect(result.ok).toBe(false);
+      expect(result.confidence).toBeUndefined();
+    }
+  });
+
+  it('keeps 5xx a hard failure so a real outage is never laundered', async () => {
+    // Phase 2: a dependency outage must stay a FAILED check — never a pass the
+    // user could attest away.
+    for (const status of [500, 502, 503]) {
+      const v = verifier({
+        fetchImpl: (async () => new Response('down', { status })) as typeof fetch,
+      });
+      const result = await v('https://example.com/broken');
+      expect(result.ok).toBe(false);
+      expect(result.confidence).toBeUndefined();
+      expect(result.reason).toContain(String(status));
+    }
+  });
+
   it('never follows a redirect into a blocked target', async () => {
     const calls: string[] = [];
     const v = verifier({
@@ -139,7 +199,10 @@ describe('source verifier', () => {
           : new Response('ok', { status: 200 });
       }) as typeof fetch,
     });
-    await expect(v('https://example.com/redirect')).resolves.toEqual({ ok: true });
+    await expect(v('https://example.com/redirect')).resolves.toEqual({
+      ok: true,
+      confidence: 'confirmed',
+    });
   });
 
   it('fails after the redirect limit', async () => {
@@ -162,6 +225,7 @@ describe('source verifier', () => {
     });
     const result = await v('https://example.com/');
     expect(result.ok).toBe(true);
-    expect(Object.keys(result).sort()).toEqual(['ok']);
+    expect(result.confidence).toBe('confirmed');
+    expect(Object.keys(result).sort()).toEqual(['confidence', 'ok']);
   });
 });

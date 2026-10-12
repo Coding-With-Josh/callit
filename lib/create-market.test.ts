@@ -358,6 +358,107 @@ describe('create-market pipeline', () => {
     }
   });
 
+  it('accepts a bot-blocked public host ONLY against an explicit attestation', async () => {
+    // Phase 3: Cloudflare-fronted sources (DefiLlama, CoinGecko) answer 403 to
+    // every server-side fetch. The URL is public and SSRF-clean, but the page
+    // itself was never read — so it clears the gate only when the user says so.
+    const unconfirmed: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      verifySource: async () => ({
+        ok: true,
+        confidence: 'unconfirmed',
+        reason: 'source responded with HTTP 403 — the site refuses automated checks',
+      }),
+    };
+
+    const silent = await requireVerifiedSource(
+      ['https://defillama.com/chain/Solana'],
+      unconfirmed,
+    );
+    expect(silent.ok).toBe(false);
+    if (!silent.ok) expect(silent.error.kind).toBe('unconfirmed_source');
+
+    const attested = await requireVerifiedSource(
+      ['https://defillama.com/chain/Solana'],
+      unconfirmed,
+      { attestUnconfirmed: true },
+    );
+    expect(attested.ok).toBe(true);
+    if (attested.ok) expect(attested.value[0]?.confidence).toBe('unconfirmed');
+  });
+
+  it('opens the gate only on the exact boolean true, never a truthy value', async () => {
+    // Fail-closed: attestation is a human assertion, and anything merely truthy
+    // (a 1, a string, an object) must not stand in for it.
+    const unconfirmed: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      verifySource: async () => ({ ok: true, confidence: 'unconfirmed' }),
+    };
+    for (const bogus of [1, 'yes', {}, []]) {
+      const result = await requireVerifiedSource(
+        ['https://defillama.com/chain/Solana'],
+        unconfirmed,
+        { attestUnconfirmed: bogus as unknown as boolean },
+      );
+      expect(result.ok).toBe(false);
+    }
+  });
+
+  it('never lets attestation rescue a source that outright failed', async () => {
+    // The direction that must stay impossible: a 404 is a rejection, not a
+    // "we could not check it", and no checkbox may clear it.
+    const down: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      verifySource: async () => ({
+        ok: false,
+        reason: 'source responded with HTTP 404',
+      }),
+    };
+    const result = await requireVerifiedSource(
+      ['https://defillama.com/chain/NOPE'],
+      down,
+      { attestUnconfirmed: true },
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error.kind).toBe('unverified_source');
+  });
+
+  it('needs no attestation when any source is confirmed', async () => {
+    const mixed: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      verifySource: async (url) =>
+        url.includes('defillama')
+          ? { ok: true, confidence: 'unconfirmed' }
+          : { ok: true, confidence: 'confirmed' },
+    };
+    const result = await requireVerifiedSource(
+      ['https://defillama.com/chain/Solana', 'https://example.com/confirmed'],
+      mixed,
+    );
+    expect(result.ok).toBe(true);
+  });
+
+  it('stamps each check with the tier the adapter reported', async () => {
+    const unconfirmed: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      verifySource: async () => ({ ok: true, confidence: 'unconfirmed' }),
+    };
+    const check = await checkSource(
+      'https://defillama.com/chain/Solana',
+      unconfirmed,
+    );
+    expect(check.ok).toBe(true);
+    expect(check.confidence).toBe('unconfirmed');
+
+    // An adapter that reports no tier is reporting the strong one (the preview
+    // fixture), so a confirmed check keeps its own confidence.
+    const confirmed = await checkSource(
+      'https://fixture.example.com/source-of-truth',
+      fixtureCreateAdapters,
+    );
+    expect(confirmed.confidence).toBe('confirmed');
+  });
+
   it('treats a source-verification outage as unverified, never a pass', async () => {
     const broken: CreateAdapters = {
       ...fixtureCreateAdapters,

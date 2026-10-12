@@ -17,8 +17,23 @@
  *     hop re-runs the same validation + DNS checks — a redirect into a blocked
  *     target is refused before any fetch
  * The response body is never read: status alone decides, and only `ok`/
- * `reason` ever leave this module, so response contents can never leak back to
- * a caller or a user.
+ * `confidence`/`reason` ever leave this module, so response contents can never
+ * leak back to a caller or a user.
+ *
+ * Two tiers (Phase 3, 2026-10: "a 2xx is not the only good answer"): a 2xx
+ * means the exact page is publicly served — `confidence: 'confirmed'`. But the
+ * dominant real-world sources for this product are behind Cloudflare-class bot
+ * management, which answers 403 (or 429 when throttling) to EVERY non-browser
+ * fetch — verified against defillama.com and coingecko.com, where no
+ * User-Agent/Accept permutation helps. A 403 is emitted by the edge before the
+ * origin, so it proves "public host, answered" but NOT "this page exists".
+ * Collapsing it into a pass would let a typo on the same host verify with the
+ * same confidence as a real page, so it is surfaced as `confidence:
+ * 'unconfirmed'` and the create gate accepts it ONLY against the user's
+ * explicit attestation (lib/create-market.ts, `unconfirmed_source`).
+ * Everything else — 401/407 (credentials required), 405 (GET refused), 404/410
+ * (no such page), 5xx, timeouts, blocked addresses — stays a hard failure,
+ * because a source a resolver also cannot read is not a source.
  *
  * Residual (documented, not closed): DNS resolution and the fetch are separate
  * steps, so a hostname that re-resolves differently between them (DNS
@@ -28,6 +43,7 @@
  */
 import { lookup } from 'node:dns/promises';
 import { err, ok, type Result } from '@/types';
+import type { SourceConfidence } from '@/lib/create-market';
 
 /** How long one source check may take before it fails closed. */
 export const DEFAULT_VERIFY_TIMEOUT_MS = 8_000;
@@ -44,9 +60,15 @@ export interface SourceVerifierOptions {
   readonly maxRedirects?: number;
 }
 
-/** Safe user-facing verdict. Structurally identical to SourceVerification. */
+/**
+ * Safe user-facing verdict. Structurally compatible with SourceVerification.
+ *
+ * `confidence` is present exactly when `ok` is true. `unconfirmed` is a pass the
+ * gate may only take with a human attestation — it is never "verified".
+ */
 export interface SourceVerdict {
   readonly ok: boolean;
+  readonly confidence?: SourceConfidence;
   readonly reason?: string;
 }
 
@@ -152,8 +174,20 @@ async function hostIsBlocked(
   return blocked ? 'source resolves to a private network address' : null;
 }
 
+/**
+ * Phase 3 (exact list is the control): statuses that mean "the site refused an
+ * automated client", not "this URL is broken".
+ *
+ * Kept NARROW on purpose. 401/407 (credentials required) and 405 (GET refused)
+ * are NOT here: a resolver fetching the source hits the same wall, so those stay
+ * hard failures. 5xx stays a failure so a real origin outage can never be
+ * laundered into an accepted source (Phase 2: an outage is a FAILED check).
+ */
+const REFUSED_STATUSES: ReadonlySet<number> = new Set([403, 429]);
+
 type FetchOutcome =
   | { readonly kind: 'verified' }
+  | { readonly kind: 'unconfirmed'; readonly reason: string }
   | { readonly kind: 'redirect'; readonly location: string | null }
   | { readonly kind: 'failed'; readonly reason: string };
 
@@ -183,6 +217,14 @@ async function fetchOnce(
     }
     if (response.status >= 300 && response.status < 400) {
       return { kind: 'redirect', location: response.headers.get('location') };
+    }
+    // Bot management / throttling: public host, answered, exact page unproven.
+    // The status number is safe to echo — it is not response content.
+    if (REFUSED_STATUSES.has(response.status)) {
+      return {
+        kind: 'unconfirmed',
+        reason: `source responded with HTTP ${response.status} — the site refuses automated checks`,
+      };
     }
     return { kind: 'failed', reason: `source responded with HTTP ${response.status}` };
   } catch {
@@ -224,7 +266,13 @@ export function createSourceVerifier(
       if (blocked !== null) return { ok: false, reason: blocked };
 
       const outcome = await fetchOnce(current.value, fetchImpl, timeoutMs);
-      if (outcome.kind === 'verified') return { ok: true };
+      if (outcome.kind === 'verified') {
+        return { ok: true, confidence: 'confirmed' };
+      }
+      if (outcome.kind === 'unconfirmed') {
+        // A pass, but an honest one: the gate must demand attestation for this.
+        return { ok: true, confidence: 'unconfirmed', reason: outcome.reason };
+      }
       if (outcome.kind === 'failed') return { ok: false, reason: outcome.reason };
 
       // Redirect: resolve the target against the current URL, then re-run the

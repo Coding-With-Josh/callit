@@ -53,11 +53,27 @@ const createBuildResponseSchema = z.object({
   buildExpiresAt: unixSecondsSchema,
 });
 
-/** The verdict shape the source-verify route returns. */
-const sourceVerdictResponseSchema = z.object({
-  ok: z.boolean(),
-  reason: z.string().optional(),
-});
+/**
+ * The verdict shape the source-verify route returns.
+ *
+ * Strict by design (Phase 3): an `ok` verdict MUST carry a tier. Tolerating a
+ * bare `{ ok: true }` would read an unconfirmed result as confirmed if the route
+ * ever stopped sending the tier — i.e. it would silently skip the attestation
+ * the user is supposed to give. An unrecognised shape is a refusal instead.
+ * `reason` is bounded: it is fixed copy from our own verifier, and a compromised
+ * route must not be able to push an unbounded string into the UI.
+ */
+const sourceVerdictResponseSchema = z.union([
+  z.object({
+    ok: z.literal(true),
+    confidence: z.enum(['confirmed', 'unconfirmed']),
+    reason: z.string().max(300).optional(),
+  }),
+  z.object({
+    ok: z.literal(false),
+    reason: z.string().max(300).optional(),
+  }),
+]);
 
 /**
  * A malformed create payload. Carries fixed copy only — the zod issue tree can
@@ -91,9 +107,36 @@ export function parseSourceVerdict(data: unknown): SourceVerification {
   if (!parsed.success) {
     return { ok: false, reason: 'The source check returned an unreadable result.' };
   }
-  return parsed.data.ok
-    ? { ok: true }
-    : { ok: false, reason: parsed.data.reason ?? 'The source could not be reached.' };
+  if (parsed.data.ok) {
+    return parsed.data.confidence === 'unconfirmed'
+      ? {
+          ok: true,
+          confidence: 'unconfirmed',
+          reason:
+            parsed.data.reason ??
+            'the site refuses automated checks, so this page could not be read',
+        }
+      : { ok: true, confidence: 'confirmed' };
+  }
+  return { ok: false, reason: parsed.data.reason ?? 'The source could not be reached.' };
+}
+
+/**
+ * Fixed user copy for a FAILED source-check request, keyed by the route status.
+ *
+ * Phase 2 (no internals leak): the response body is never read; only the number
+ * is used. This exists because collapsing every status into one sentence made a
+ * missing route (404) indistinguishable from an upstream 5xx — the wizard showed
+ * "could not be checked right now" for both, and the real cause was invisible.
+ */
+export function describeSourceCheckError(status: number): string {
+  if (status === 0) return 'Source checking could not be reached.';
+  if (status === 401 || status === 403) return 'Sign in again to check sources.';
+  if (status === 400) return 'That source URL could not be checked.';
+  if (status === 404) return 'Source checking is not available right now.';
+  if (status === 429) return 'Too many source checks — wait a moment and try again.';
+  if (status >= 500) return 'Source checking is temporarily unavailable.';
+  return 'The source could not be checked right now.';
 }
 
 /** Fixed user copy keyed by the route's HTTP status. Never the response body. */

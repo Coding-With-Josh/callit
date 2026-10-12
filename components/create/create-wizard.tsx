@@ -289,6 +289,18 @@ export const CreateWizard = () => {
     new Set(),
   );
   const [startDateError, setStartDateError] = useState<string | null>(null);
+  /**
+   * Phase 3 (gate honesty): the user's explicit assertion for a source the site
+   * would not let us confirm. A human statement, not a permission — and it is
+   * cleared on every source edit, so it can never outlive the URL it was given
+   * for.
+   */
+  const [sourceAttested, setSourceAttested] = useState(false);
+
+  /** A passed-but-unconfirmed check is not "verified"; it needs attestation. */
+  const hasUnconfirmed = Object.values(sourceChecks).some(
+    (check) => check.ok && check.confidence === "unconfirmed",
+  );
 
   const status: WizardStatus = lifecycle ? lifecycle.status : "intake";
 
@@ -345,6 +357,9 @@ export const CreateWizard = () => {
    *  old verdict never carries over. */
   const updateSources = (next: readonly string[]) => {
     updateRaw({ sourcesOfTruth: [...next] });
+    // Fail-closed: an edited URL must verify again — the old verdict never
+    // carries over, and neither does the attestation given for it.
+    setSourceAttested(false);
     const present = new Set(
       next.map((source) => source.trim()).filter((s) => s.length > 0),
     );
@@ -405,6 +420,7 @@ export const CreateWizard = () => {
       setShowDates(false);
       setSourceChecks({});
       setVerifyingSources(new Set());
+      setSourceAttested(false);
       setStartDateError(null);
     });
 
@@ -414,9 +430,16 @@ export const CreateWizard = () => {
       setError(null);
       // Phase 1 (source-of-truth gate): no next stage without at least one
       // VERIFIED public source of truth. Re-verifies fresh on every continue.
-      const gate = await requireVerifiedSource(raw.sourcesOfTruth, adapters);
+      // A bot-blocked (unconfirmed) source clears the gate only against the
+      // user's own attestation.
+      const gate = await requireVerifiedSource(raw.sourcesOfTruth, adapters, {
+        attestUnconfirmed: sourceAttested,
+      });
       if (!gate.ok) {
-        if (gate.error.kind === "unverified_source") {
+        if (
+          gate.error.kind === "unverified_source" ||
+          gate.error.kind === "unconfirmed_source"
+        ) {
           setSourceChecks(checksRecord(gate.error.checks));
         }
         setError(gate.error);
@@ -452,13 +475,18 @@ export const CreateWizard = () => {
       if (!lifecycle || lifecycle.status !== "resolvable") return;
       setError(null);
       // Fresh verification at the spend boundary (Phase 3: no stale source
-      // proof) — a source that went down since the draft stage stops here.
+      // proof) — a source that went down since the draft stage stops here, and
+      // the attestation is supplied again rather than remembered.
       const gate = await requireVerifiedSource(
         lifecycle.draft.sourcesOfTruth,
         adapters,
+        { attestUnconfirmed: sourceAttested },
       );
       if (!gate.ok) {
-        if (gate.error.kind === "unverified_source") {
+        if (
+          gate.error.kind === "unverified_source" ||
+          gate.error.kind === "unconfirmed_source"
+        ) {
           setSourceChecks(checksRecord(gate.error.checks));
         }
         setError(gate.error);
@@ -781,7 +809,7 @@ export const CreateWizard = () => {
                           </button>
                         </div>
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-1">
-                          {check?.ok ? (
+                          {check?.ok && check.confidence !== "unconfirmed" ? (
                             <span
                               className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 font-mono text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200"
                               title={`Verified ${formatAsOf(
@@ -789,6 +817,16 @@ export const CreateWizard = () => {
                               )}`}
                             >
                               Verified source
+                            </span>
+                          ) : check?.ok ? (
+                            /* Phase 3: reached, but the page itself was never
+                               read — never labelled "verified". */
+                            <span
+                              role="status"
+                              className="inline-flex max-w-full items-center truncate rounded-full bg-amber-50 px-2.5 py-0.5 font-mono text-[10px] font-medium text-amber-800 ring-1 ring-amber-200"
+                              title={check.reason}
+                            >
+                              Couldn&apos;t auto-confirm — site blocks bots
                             </span>
                           ) : check && !check.ok ? (
                             <span
@@ -828,6 +866,27 @@ export const CreateWizard = () => {
                     A verified public source of truth is required before you
                     can continue.
                   </p>
+                )}
+                {/* Phase 3 (gate honesty): shown only when a source passed as
+                    `unconfirmed`, i.e. the site refused our automated check. The
+                    user's assertion is the ONLY thing that clears the gate for
+                    it — and it is reset whenever a URL changes. */}
+                {hasUnconfirmed && (
+                  <label className="mt-3 flex cursor-pointer items-start gap-2.5 rounded-xl bg-amber-50 p-3 ring-1 ring-amber-200">
+                    <input
+                      type="checkbox"
+                      checked={sourceAttested}
+                      onChange={(event) =>
+                        setSourceAttested(event.target.checked)
+                      }
+                      className="mt-0.5 size-3.5 shrink-0 cursor-pointer accent-[#2D1C00]"
+                    />
+                    <span className="text-xs font-medium leading-relaxed tracking-tight text-amber-900">
+                      I&apos;ve confirmed this page is public and states the
+                      outcome. The site blocks automated checks, so we
+                      couldn&apos;t read it for you.
+                    </span>
+                  </label>
                 )}
               </div>
 
@@ -1230,6 +1289,41 @@ const DraftRule = ({ rule }: { rule: string }) => (
   </div>
 );
 
+/**
+ * One source's stamp as a line in a gate panel. Never renders "verified" for a
+ * check that was only reachable: `unconfirmed` is its own state, and saying
+ * otherwise would be the exact dishonesty this tier exists to avoid.
+ */
+const SourceCheckLine = ({ check }: { check: SourceCheck }) => (
+  <li className="flex flex-col">
+    <span className="font-mono text-xs text-amber-900/80">{check.url}</span>
+    <span
+      className={
+        !check.ok
+          ? "text-red-700"
+          : check.confidence === "unconfirmed"
+            ? "text-amber-800"
+            : "text-emerald-700"
+      }
+    >
+      {!check.ok
+        ? (check.reason ?? "not verified")
+        : check.confidence === "unconfirmed"
+          ? "reached, but the page itself could not be read (the site blocks automated checks)"
+          : "verified"}
+    </span>
+  </li>
+);
+
+const SourceCheckList = ({ checks }: { checks: readonly SourceCheck[] }) =>
+  checks.length === 0 ? null : (
+    <ul className="mt-2 space-y-1.5 text-sm leading-relaxed">
+      {checks.map((check) => (
+        <SourceCheckLine key={check.url} check={check} />
+      ))}
+    </ul>
+  );
+
 /** Renders every CreateMarketError variant honestly; never a raw throw. */
 const ErrorPanel = ({ error }: { error: CreateMarketError | null }) => {
   if (!error) return null;
@@ -1248,22 +1342,26 @@ const ErrorPanel = ({ error }: { error: CreateMarketError | null }) => {
             ? "Add at least one public source of truth, then verify it."
             : "Continuing needs at least one verified source of truth. Every source must check out:"}
         </p>
-        {error.checks.length > 0 && (
-          <ul className="mt-2 space-y-1.5 text-sm leading-relaxed">
-            {error.checks.map((check) => (
-              <li key={check.url} className="flex flex-col">
-                <span className="font-mono text-xs text-amber-900/80">
-                  {check.url}
-                </span>
-                <span
-                  className={check.ok ? "text-emerald-700" : "text-red-700"}
-                >
-                  {check.ok ? "verified" : check.reason ?? "not verified"}
-                </span>
-              </li>
-            ))}
-          </ul>
-        )}
+        <SourceCheckList checks={error.checks} />
+      </div>
+    );
+  }
+
+  if (error.kind === "unconfirmed_source") {
+    return (
+      <div
+        role="alert"
+        className="mt-4 rounded-xl bg-amber-50 p-4 ring-1 ring-amber-200"
+      >
+        <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-amber-900/70">
+          Confirm your source
+        </p>
+        <p className="mt-1 text-sm font-medium leading-relaxed text-amber-900">
+          We reached the site, but it refuses automated checks, so the page
+          itself was never read. Tick the confirmation above to continue — or
+          use a source we can open directly.
+        </p>
+        <SourceCheckList checks={error.checks} />
       </div>
     );
   }

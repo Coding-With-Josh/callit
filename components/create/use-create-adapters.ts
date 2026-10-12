@@ -26,6 +26,7 @@ import { useSolanaSigner } from '@/components/auth/use-solana-signer';
 import { authedJson } from '@/components/auth/authed-json';
 import {
   describeCreateClientError,
+  describeSourceCheckError,
   parseCreateBuild,
   parseCreateQuote,
   parseSourceVerdict,
@@ -139,14 +140,19 @@ export function useCreateAdapters(): CreateAdapters {
        * Phase 3 (SSRF + fail-closed gate): the check runs server-side behind the
        * session guard. An unreachable host, a timeout, or a failed route all come
        * back `ok: false` — there is no path here that returns a pass on failure.
+       * A failed ROUTE, though, is not a verdict about the URL, so it is
+       * reported per status (`describeSourceCheckError`) rather than masked as
+       * one catch-all sentence — that masking is what hid a missing route
+       * behind "could not be checked right now".
        */
       verifySource: async (url) => {
         const res = await authedJson('/api/sources/verify', {
           method: 'POST',
           body: { url },
         });
+        // The failure body is never read (Phase 2) — only the status number.
         if (!res.ok) {
-          return { ok: false, reason: 'The source could not be checked right now.' };
+          return { ok: false, reason: describeSourceCheckError(res.status) };
         }
         return parseSourceVerdict(res.data);
       },

@@ -73,11 +73,36 @@ export type CreateMarketError =
       readonly kind: "unverified_source";
       readonly checks: readonly SourceCheck[];
     }
+  | {
+      /**
+       * Phase 3 (gate honesty): the host is public and answered, but the site
+       * refused automated clients so the EXACT page was never proven. Distinct
+       * from `unverified_source` on purpose — this one is clearable by the
+       * user's attestation, and by nothing else.
+       */
+      readonly kind: "unconfirmed_source";
+      readonly checks: readonly SourceCheck[];
+    }
   | { readonly kind: "adapter"; readonly message: string };
 
-/** Verdict from one source-verification adapter call (I/O, not a stage). */
+/**
+ * How much a passed check actually proved (Phase 3).
+ *   `confirmed`   — a 2xx: the exact page is publicly served.
+ *   `unconfirmed` — a public host answered 403/429 (bot management/throttling).
+ *                   It exists and is fetchable, but the page itself was never
+ *                   read, so this is NEVER presented as "verified".
+ */
+export type SourceConfidence = "confirmed" | "unconfirmed";
+
+/**
+ * Verdict from one source-verification adapter call (I/O, not a stage).
+ * `confidence` is only meaningful when `ok`; absent `confidence` on an `ok`
+ * verdict means `confirmed` (the preview fixture, and any caller that has no
+ * tier to report).
+ */
 export interface SourceVerification {
   readonly ok: boolean;
+  readonly confidence?: SourceConfidence;
   readonly reason?: string;
 }
 
@@ -85,6 +110,8 @@ export interface SourceVerification {
 export interface SourceCheck {
   readonly url: string;
   readonly ok: boolean;
+  /** Absent on a failed check — a rejection has nothing to be confident about. */
+  readonly confidence?: SourceConfidence;
   readonly reason?: string;
   readonly checkedAt: UnixSeconds;
 }
@@ -427,10 +454,22 @@ export async function checkSource(
   const trimmed = url.trim();
   try {
     const verified = await adapters.verifySource(trimmed);
+    if (!verified.ok) {
+      return {
+        url: trimmed,
+        ok: false,
+        reason: verified.reason,
+        checkedAt: adapters.now(),
+      };
+    }
     return {
       url: trimmed,
-      ok: verified.ok,
-      reason: verified.ok ? undefined : verified.reason,
+      ok: true,
+      // An adapter that reports no tier is reporting the strong one (the
+      // preview fixture does exactly this). Anything that is not explicitly
+      // 'unconfirmed' must not be treated as weaker than it is.
+      confidence:
+        verified.confidence === "unconfirmed" ? "unconfirmed" : "confirmed",
       checkedAt: adapters.now(),
     };
   } catch (error) {
@@ -447,14 +486,26 @@ export async function checkSource(
 
 /**
  * Phase 3 (source-of-truth gate): no lifecycle stage past the draft may be
- * reached without at least one VERIFIED public source of truth. The domain
- * (checkResolvable) proves the source is a syntactically public http(s) URL;
- * this adds the reachability proof on top. Returns the per-source checks for
- * the wizard's chips on success, or an `unverified_source` error on failure.
+ * reached without a usable public source of truth. The domain (checkResolvable)
+ * proves the source is a syntactically public http(s) URL; this adds the
+ * reachability proof on top. Returns the per-source checks for the wizard's
+ * chips on success, or a `*_source` error on failure.
+ *
+ * Three outcomes, in strict order of strength:
+ *   1. any `confirmed` check       -> ok, no attestation needed.
+ *   2. only `unconfirmed` checks   -> ok ONLY when `attestUnconfirmed === true`.
+ *      The caller is asserting a fact it cannot verify, which is why the exact
+ *      `true` comparison is used: a truthy-but-not-true value (a string, a 1)
+ *      must not open the gate.
+ *   3. nothing usable              -> `unverified_source`.
+ *
+ * Attestation can never rescue a check that outright failed — reachable in any
+ * stage's gate, and the direction that must stay impossible.
  */
 export async function requireVerifiedSource(
   sources: readonly string[],
   adapters: CreateAdapters,
+  options: { readonly attestUnconfirmed?: boolean } = {},
 ): Promise<Result<readonly SourceCheck[], CreateMarketError>> {
   const nonEmpty = sources.map((source) => source.trim()).filter((s) => s.length > 0);
   if (nonEmpty.length === 0) {
@@ -464,7 +515,14 @@ export async function requireVerifiedSource(
   for (const source of nonEmpty) {
     checks.push(await checkSource(source, adapters));
   }
-  if (checks.some((check) => check.ok)) return ok(checks);
+  if (checks.some((check) => check.ok && check.confidence === "confirmed")) {
+    return ok(checks);
+  }
+  if (checks.some((check) => check.ok)) {
+    return options.attestUnconfirmed === true
+      ? ok(checks)
+      : err({ kind: "unconfirmed_source", checks });
+  }
   return err({ kind: "unverified_source", checks });
 }
 
@@ -541,7 +599,7 @@ export const fixtureCreateAdapters: CreateAdapters = {
     if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) {
       return { ok: false, reason: "IP-address sources are not allowed" };
     }
-    return { ok: true };
+    return { ok: true, confidence: "confirmed" };
   },
 
   requestQuote: async () => ({
