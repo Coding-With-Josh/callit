@@ -40,6 +40,42 @@ export function standardStartFloor(now: UnixSeconds): UnixSeconds {
   return unixSeconds(now + MIN_STANDARD_LEAD_SECONDS + STANDARD_LEAD_MARGIN_SECONDS);
 }
 
+/**
+ * Lift a start time that has gone STALE by the time `now` is actually consumed.
+ *
+ * The lead rule is measured against a moving clock, and `now` is read at more
+ * than one moment: the draft step floors its start when the user continues, but
+ * the value is really consumed later, when the quote is produced — and Panta
+ * measures the lead against ITS clock at that point. The slack above Panta's own
+ * `minimumStartDelay` (3600s) is only {@link STANDARD_LEAD_MARGIN_SECONDS}
+ * (300s), which is less than the time it takes a person to finish the wizard. A
+ * draft floored at Continue is therefore rejected upstream moments later with
+ * "startTime must be at least 3600s ahead of now", surfaced to the user as
+ * "that draft isn't valid" — for a value the app, not the user, chose.
+ *
+ * This is the ONE rule, applied wherever `now` is consumed. It mirrors the
+ * domain validator's own re-floor exactly, and deliberately:
+ *   - only ever moves a start LATER, never earlier, so a later choice by the
+ *     user is preserved;
+ *   - a start on a PAST day is left alone, because past-date injection must be
+ *     rejected rather than silently rescued;
+ *   - `usesBreaking` selects the floor: the hard floor (plus headroom) for a
+ *     standard market, `now` for a breaking market already in progress.
+ *
+ * `startTime` must already be well-formed (non-negative integer); `RawDraft`
+ * carries a plain number, and the untrusted-input guard belongs at the caller
+ * that first reads it.
+ */
+export function refloorStaleStart(
+  startTime: number,
+  now: UnixSeconds,
+  usesBreaking: boolean,
+): UnixSeconds {
+  const floor = usesBreaking ? now : standardStartFloor(now);
+  if (startOfUnixDay(startTime) < startOfUnixDay(now)) return unixSeconds(startTime);
+  return startTime < floor ? floor : unixSeconds(startTime);
+}
+
 /** A non-negative integer number of seconds since the Unix epoch. */
 export const unixSecondsSchema = z
   .number()

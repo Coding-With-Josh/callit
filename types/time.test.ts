@@ -9,6 +9,7 @@ import {
   MIN_STANDARD_LEAD_SECONDS,
   STANDARD_LEAD_MARGIN_SECONDS,
   standardStartFloor,
+  refloorStaleStart,
 } from './time';
 
 const u = (value: number) => unixSecondsSchema.parse(value);
@@ -71,5 +72,50 @@ describe('time', () => {
   it('rejects negative or fractional seconds', () => {
     expect(unixSecondsSchema.safeParse(-1).success).toBe(false);
     expect(unixSecondsSchema.safeParse(1.5).success).toBe(false);
+  });
+});
+
+describe('refloorStaleStart', () => {
+  // Pin the fixtures INSIDE one UTC day: `now` and the stale value must share a
+  // day, otherwise the past-day guard (correctly) refuses the lift and the test
+  // would be asserting the wrong branch.
+  const DAY_START = startOfUnixDay(u(1_790_000_000));
+  const NOW = u(DAY_START + 43_200); // mid-day
+
+  it('lifts a stale start to the fresh floor (the elapsed-clock bug)', () => {
+    // Floored early in the day, then quoted 40,000s later: still the same day,
+    // but now far inside the lead — which is what Panta rejects with
+    // "startTime must be at least 3600s ahead of now".
+    const stale = u(DAY_START + 3_600);
+    expect(refloorStaleStart(stale, NOW, false)).toBe(standardStartFloor(NOW));
+  });
+
+  it('leaves an already-valid start untouched', () => {
+    const fresh = u(NOW + MIN_STANDARD_LEAD_SECONDS + 10_000);
+    expect(refloorStaleStart(fresh, NOW, false)).toBe(fresh);
+  });
+
+  it('never moves a later choice earlier', () => {
+    // A user who deliberately picked a start well out must keep it, even though
+    // it is far beyond the floor.
+    const later = u(NOW + 90 * 86_400);
+    expect(refloorStaleStart(later, NOW, false)).toBe(later);
+  });
+
+  it('never rescues a start on a PAST day (past-date injection)', () => {
+    // This is the security-relevant branch: a lift here would silently defeat
+    // the validator's past-date wall, so the value must come back unchanged and
+    // let validation reject it.
+    const yesterday = u(NOW - 86_400);
+    expect(refloorStaleStart(yesterday, NOW, false)).toBe(yesterday);
+  });
+
+  it('uses `now` as the floor for a breaking market already in progress', () => {
+    // A breaking in-progress market is allowed to start immediately, so the
+    // standard floor must NOT be applied to it.
+    const yesterday = u(NOW - 86_400);
+    expect(refloorStaleStart(yesterday, NOW, true)).toBe(yesterday);
+    const soon = u(NOW + 5);
+    expect(refloorStaleStart(soon, NOW, true)).toBe(soon);
   });
 });

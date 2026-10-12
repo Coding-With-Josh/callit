@@ -36,6 +36,7 @@ import type { CreateAdapters } from '@/lib/create-market';
 import { describeSignRequestError } from '@/lib/solana/sign-messages';
 import {
   MARKET_CATEGORY_SLUGS,
+  refloorStaleStart,
   standardStartFloor,
   txSignature,
   unixSeconds,
@@ -176,9 +177,31 @@ export function useCreateAdapters(): CreateAdapters {
       },
 
       requestQuote: async (draft, imageUrl) => {
+        /**
+         * Re-floor the start time at CONSUMPTION time, not just at validation.
+         *
+         * `now` is read here (and by Panta) long after the draft step floored it:
+         * the wizard's steps, a wallet prompt, and a human reading the review
+         * all sit between Continue and this call. The slack above Panta's own
+         * `minimumStartDelay` (3600s) is only STANDARD_LEAD_MARGIN_SECONDS
+         * (300s), so a draft that was valid at Continue is refused minutes later
+         * with "startTime must be at least 3600s ahead of now" — reported to the
+         * user as "that draft isn't valid", when the start time is the app's
+         * choice, not theirs.
+         *
+         * The SAME rule the validator uses (types/time refloorStaleStart), so
+         * the value quoted matches the value validated; it only ever moves the
+         * start LATER, preserving a later choice and never rescuing a past day.
+         */
+        const usesBreaking =
+          draft.marketType === 'breaking' && draft.eventInProgress === true;
+        const freshDraft: typeof draft = {
+          ...draft,
+          startTime: refloorStaleStart(draft.startTime, nowSeconds(), usesBreaking),
+        };
         const res = await authedJson('/api/panta/create/quote', {
           method: 'POST',
-          body: { draft, imageUrl },
+          body: { draft: freshDraft, imageUrl },
         });
         // A session failure must name itself, not read as "sign in" — that is
         // the copy that told a signed-in user to sign in.

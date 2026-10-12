@@ -38,8 +38,8 @@ import {
   ok,
   openCreateQuote,
   parseRawDraft,
+  refloorStaleStart,
   standardStartFloor,
-  startOfUnixDay,
   txSignature,
   unsignedTransactionB64Schema,
   unixSeconds,
@@ -246,15 +246,20 @@ export async function validateDraftStep(
   let raw = lifecycle.raw;
   const usesBreaking =
     raw.marketType === "breaking" && raw.eventInProgress === true;
-  const floor = usesBreaking ? unixSeconds(now) : standardStartFloor(now);
+  // Untrusted input: prove well-formedness BEFORE handing the start to the
+  // shared rule, whose day arithmetic throws on a negative/invalid value.
   const startIsWellFormed =
     Number.isInteger(raw.startTime) && raw.startTime >= 0;
-  if (
-    startIsWellFormed &&
-    startOfUnixDay(raw.startTime) >= startOfUnixDay(now) &&
-    raw.startTime < floor
-  ) {
-    raw = { ...raw, startTime: floor };
+  if (startIsWellFormed) {
+    // The rule itself lives in types/time (refloorStaleStart) because `now` is
+    // consumed at TWO moments — here, and again when the quote is produced. The
+    // quote producer re-applies the SAME rule so a draft that was valid at
+    // Continue is still valid upstream minutes later, instead of being refused
+    // with "startTime must be at least 3600s ahead of now".
+    raw = {
+      ...raw,
+      startTime: refloorStaleStart(raw.startTime, now, usesBreaking),
+    };
   }
   const result = validateDraft(raw, {
     categories,
