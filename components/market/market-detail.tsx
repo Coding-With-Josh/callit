@@ -6,7 +6,7 @@ import {
 } from "@/lib/create-image";
 import { loadCoverFontCssServer } from "@/lib/create-image.server";
 import { type MarketFixture } from "@/lib/market-fixtures";
-import { formatUnixDate, formatUsdc } from "@/lib/format";
+import { formatUnixDate, formatUsdcCompact } from "@/lib/format";
 import { type Market, type MarketPhase } from "@/types";
 import { PantaBadge } from "./panta-badge";
 import { ShareMenu } from "./share-menu";
@@ -119,7 +119,7 @@ const MarketMeta = ({ market }: { market: Market }) => (
     <MetaItem label="Open since" value={formatUnixDate(market.startTime)} />
     <MetaItem label="Closes" value={formatUnixDate(market.endTime)} />
     <MetaItem label="Resolves" value={formatUnixDate(market.resolutionTime)} />
-    <MetaItem label="Volume" value={formatUsdc(market.volumeUsdc)} />
+    <MetaItem label="Volume" value={formatUsdcCompact(market.volumeUsdc)} />
   </dl>
 );
 
