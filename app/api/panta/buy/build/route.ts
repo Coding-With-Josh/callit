@@ -16,9 +16,26 @@ export async function POST(req: NextRequest) {
   if (!body||typeof body!=='object') return NextResponse.json({ error:'invalid body' }, { status:400, headers:NO_STORE });
   const b=body as any;
   if (typeof b.quoteId!=='string') return NextResponse.json({ error:'quoteId required' }, { status:400, headers:NO_STORE });
+  // Phase 4 (perimeter): maxSlippageBps is optional, but if present it must be
+  // the integer range the wire schema accepts — reject it here as a clean 400
+  // rather than letting the adapter's zod parse throw.
+  if (
+    b.maxSlippageBps !== undefined &&
+    (typeof b.maxSlippageBps !== 'number' ||
+      !Number.isInteger(b.maxSlippageBps) ||
+      b.maxSlippageBps < 0 ||
+      b.maxSlippageBps > 5000)
+  ) {
+    return NextResponse.json({ error:'invalid maxSlippageBps' }, { status:400, headers:NO_STORE });
+  }
   const cfg: BuyAdaptersConfig={client:ready.client,wallet:auth.wallet};
   try {
     const o = await buildBuyOrder(cfg,{ quoteId:b.quoteId, userId:b.userId, maxSlippageBps:b.maxSlippageBps });
     return NextResponse.json(o,{status:200,headers:NO_STORE});
-  } catch (e:any){ if(e?.transport)return transportErrorResponse(e.transport); return NextResponse.json({error:e?.message||'build failed'},{status:502,headers:NO_STORE}); }
+  } catch (e:any){
+    if(e?.transport)return transportErrorResponse(e.transport);
+    // Phase 2 (no internals in a response body): an UNEXPECTED throw is still a
+    // refusal, and its message is never returned to the caller.
+    return NextResponse.json({error:'build failed'},{status:502,headers:NO_STORE});
+  }
 }

@@ -9,6 +9,7 @@ import {
   type BuyQuote,
   type BuiltOrder,
   type Result,
+  type Side,
   type UsdcDecimal,
 } from '@/types';
 import {
@@ -22,8 +23,8 @@ import {
   primaryOrderVerifyResponseSchema,
 } from '@/types/panta-wire/buy';
 import { baseUnitsToUsdcDecimal, baseUnitsFromJson, baseUnitsJsonSchema, parseVerifyAmount } from '@/types/money';
-import { quoteIdSchema, orderIdSchema, txSignatureSchema, marketIdSchema } from '@/types/ids';
-import { priceSchema, sharesSchema } from '@/types/money';
+import { quoteIdSchema, orderIdSchema, txSignatureSchema, marketIdSchema, walletAddressSchema } from '@/types/ids';
+import { priceSchema, sharesSchema, usdcDecimalSchema } from '@/types/money';
 import type { PantaClient, PantaTransportError } from './client';
 import { PantaCallError, wireBaseUnitsToUsdc, wireIsoToUnixSeconds } from './client';
 
@@ -43,9 +44,18 @@ function mapOrThrow<T>(map: () => T): T {
   }
 }
 
+/**
+ * POST /primaryorderquote/. `side` is the DOMAIN side (`'yes' | 'no'`) — the
+ * wire schema is lowercase too, so it is passed through unchanged. This argument
+ * was previously typed `'YES' | 'NO'`, which made `primaryOrderQuoteRequestSchema
+ * .parse` throw a raw `ZodError` on every call (a 502 with a validation message,
+ * outside the adapters' `mapOrThrow`). Phase 3 (unit/casing confusion at the
+ * transport edge): the domain side is the only accepted form, and the regression
+ * test asserts the body actually sent.
+ */
 export async function requestBuyQuote(
   config: BuyAdaptersConfig,
-  args: { marketId: string; side: 'YES' | 'NO'; amountUsdc: UsdcDecimal; userId?: string },
+  args: { marketId: string; side: Side; amountUsdc: UsdcDecimal; userId?: string },
 ): Promise<BuyQuote> {
   const body = primaryOrderQuoteRequestSchema.parse({
     wallet: config.wallet,
@@ -91,6 +101,15 @@ export async function buildBuyOrder(
   if (!r.ok) throw new PantaCallError(r.error);
   return mapOrThrow(() => ({
     orderId: orderIdSchema.parse(r.value.orderId),
+    // Panta's echo of the order, carried into the domain so the caller can
+    // compare it against what it asked for (Phase 3: parameter substitution).
+    // Every field is re-validated here, so a nonsense echo fails at the
+    // transport boundary rather than reaching a comparison that might coerce.
+    quoteId: quoteIdSchema.parse(r.value.quoteId),
+    marketId: marketIdSchema.parse(r.value.marketId),
+    side: r.value.side,
+    wallet: walletAddressSchema.parse(r.value.wallet),
+    amountUsdc: usdcDecimalSchema.parse(r.value.amountUsdc),
     instructions: r.value.instructions,
     recentBlockhash: r.value.recentBlockhash,
     lastValidBlockHeight: r.value.lastValidBlockHeight,
@@ -126,7 +145,7 @@ export async function verifyBuyOrder(
 ): Promise<{
   status: 'built' | 'submitted' | 'confirmed' | 'failed' | 'expired';
   marketId?: string;
-  side?: 'YES' | 'NO';
+  side?: Side;
   amountUsdcBase?: bigint;
 }> {
   const body = primaryOrderVerifyRequestSchema.parse({
@@ -148,7 +167,10 @@ export async function verifyBuyOrder(
   return {
     status: r.value.status,
     marketId: r.value.marketId,
-    side: r.value.side?.toUpperCase() as 'YES' | 'NO' | undefined,
+    // The wire side is already the domain side (`'yes' | 'no'`). This previously
+    // upper-cased it into `'YES' | 'NO'`, reintroducing at the exit the same
+    // unit/casing confusion the input side had at the entrance (Phase 3).
+    side: r.value.side,
     amountUsdcBase,
   };
 }

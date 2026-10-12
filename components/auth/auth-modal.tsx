@@ -24,7 +24,9 @@
  *  - B2 SIWS: Privy's backend verifies the ed25519 signature over the SIWS
  *    message it generated (the message embeds the connected address, nonce,
  *    expiry), so a signature produced by any other wallet is rejected and a
- *    captured message cannot be replayed.
+ *    captured message cannot be replayed. The message's `Chain ID` line is
+ *    stamped to the configured cluster (`withSiwsChain`, fail-closed) so a
+ *    devnet-selected wallet will render the request; the nonce is untouched.
  *  - Link-escalation guard: when authenticated and the connected address
  *    EQUALS the session identity wallet we reconnect WITHOUT SIWS (no
  *    duplicate link). `linkWithSiws` runs only for a genuinely new address.
@@ -44,13 +46,17 @@ import {
 import { getBase64Decoder } from '@solana/kit';
 import { motion, useReducedMotion, type Variants } from 'motion/react';
 import { Loader2, ShieldAlert, Wallet, X } from 'lucide-react';
+import {
+  SIWS_CHAIN_ID,
+  SOLANA_CHAIN,
+  withSiwsChain,
+} from '@/lib/solana/cluster';
 import { useWallet } from './use-wallet';
 
 export type AuthModalMode = 'login' | 'link';
 
 /** Wallets pinned to the top of the picker, in this order. */
 const PREFERRED_WALLETS = ['Phantom', 'Backpack', 'Solflare'];
-const MAINNET_CHAIN = 'solana:mainnet';
 
 /**
  * True for Privy's internal placeholder standard wallet (display name "Privy").
@@ -108,13 +114,11 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
     };
   }, []);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  // No Escape handler on purpose: the X in the header is the only
+  // user-initiated exit (see the backdrop below). The X stays focusable, so
+  // keyboard users can still Tab to it and activate it — there is no focus trap
+  // in this dialog, so this is not a WCAG 2.1.2 keyboard trap. The success path
+  // still closes the modal programmatically.
 
   // Motion: honour prefers-reduced-motion — fade only, no transform.
   const reduce = useReducedMotion();
@@ -169,7 +173,7 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
     [reduce],
   );
 
-  // Mainnet-capable external wallets that can sign a message,
+  // Cluster-capable external wallets that can sign a message,
   // Phantom/Backpack/Solflare first, then the rest alphabetically.
   // Fail-closed: wallets without `solana:signMessage` cannot authenticate, and
   // Privy's own placeholder wallet is excluded (external wallets only).
@@ -177,7 +181,7 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
     if (!walletsReady) return [];
     const usable = wallets.filter(
       (w) =>
-        w.chains.includes(MAINNET_CHAIN) &&
+        w.chains.includes(SOLANA_CHAIN) &&
         !!w.features['solana:signMessage'] &&
         !isPrivyPlaceholder(w),
     );
@@ -257,8 +261,14 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
 
         if (!authenticated) {
           // Log in: the connected wallet IS the identity.
+          // `withSiwsChain` stamps the configured cluster onto the message
+          // (Phase 1 B2): the SDK hard-codes `Chain ID: mainnet`, which a
+          // devnet-selected wallet refuses to sign. Pure + fail-closed.
           step = 'generate-siws-message';
-          const message = await login.generateSiwsMessage({ address });
+          const message = withSiwsChain(
+            await login.generateSiwsMessage({ address }),
+            SIWS_CHAIN_ID,
+          );
           step = 'sign-message';
           const signature = await signSiws(wallet, account, message);
           step = 'siws-login';
@@ -266,7 +276,10 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
         } else if (identityWallet && address !== identityWallet) {
           // Link a genuinely new wallet to the existing account.
           step = 'generate-siws-message';
-          const message = await link.generateSiwsMessage({ address });
+          const message = withSiwsChain(
+            await link.generateSiwsMessage({ address }),
+            SIWS_CHAIN_ID,
+          );
           step = 'sign-message';
           const signature = await signSiws(wallet, account, message);
           step = 'siws-link';
@@ -310,10 +323,17 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-[#2D1C00]/50 p-6 backdrop-blur-sm"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      // Deliberately NOT dismissible by tapping the dimmed area: a stray click
+      // or tap (e.g. while a wallet prompt is open) would tear down an auth flow
+      // in progress. The X in the header is the only user-initiated exit; the
+      // success path still closes the modal programmatically.
+      //
+      // overflow-y-auto here plus my-auto on the panel, instead of items-center,
+      // keeps the header and therefore the X reachable when the panel is taller
+      // than the viewport. Without it a long wallet list on a short screen would
+      // clip the header off-screen, and with click-to-dismiss gone the modal
+      // would have no way out at all.
+      className="fixed inset-0 z-[100] flex justify-center overflow-y-auto bg-[#2D1C00]/50 p-6 backdrop-blur-md"
     >
       <motion.div
         role="dialog"
@@ -323,7 +343,7 @@ export function AuthModal({ mode, onClose }: AuthModalProps) {
         initial="initial"
         animate="animate"
         exit="exit"
-        className="w-full max-w-md overflow-hidden rounded-3xl border border-[#2D1C00]/10 bg-[#FFF2DD] shadow-2xl"
+        className="my-auto w-full max-w-md overflow-hidden rounded-3xl border border-[#2D1C00]/10 bg-[#FFF2DD] shadow-2xl"
       >
         <header className="flex items-center justify-between px-7 pt-7">
           <span className="font-tusker-8800 text-xl tracking-tight text-[#2D1C00]">

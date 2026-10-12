@@ -6,11 +6,16 @@ import Link from "next/link";
 
 export const Hero = () => {
   return (
-    <div className="flex flex-col items-center justify-center w-full h-screen">
+    <div className="flex min-h-dvh w-full flex-col items-center justify-center py-24">
+      {/* min-h-dvh (not h-screen): 100vh overshoots the visible area behind
+          mobile browser chrome, which pushed the buttons under the URL bar on
+          short viewports. min-h-* lets the hero grow and the page scroll
+          instead of clipping; py-24 is the fixed navbar's height, so content is
+          never hidden beneath it. */}
       {/* Scales down on phones so the headline never wraps mid-word;
             md:text-6xl restores the original desktop size, sm:/md: for tablets. */}
       <h1 className="text-4xl sm:text-5xl md:text-6xl font-tusker-9800 text-[#2D1C00] text-center">
-        Call it. Back it.
+        Call it. <br className="md:hidden block" /> Back it.
       </h1>
       {/* Supporting line is a <p>, not a second <h1>: the document keeps exactly
           one h1 (the headline above) for screen readers and crawlers. */}
@@ -19,15 +24,21 @@ export const Hero = () => {
         link on X or Telegram and anyone can take a side in a tap.
       </p>
 
-      {/* Mobile: stacked full-width buttons with edge padding. Desktop:
-          original centered row. mt-6 moved here keeps the 24px gap below the
-          subtitle identical on desktop without double spacing when stacked. */}
-      <div className="flex flex-col items-center justify-center gap-3 w-full px-6 mt-6 sm:flex-row sm:gap-4 sm:w-auto sm:px-0">
-        <Link href="/create">
-          <button className="w-full sm:w-auto py-3 px-6 font-sans tracking-tight font-medium text-[#FFF2DD] bg-[#2D1C00] flex items-center justify-center rounded-full hover:scale-102 active:scale-98 transition-all cursor-pointer">
-            <PlusCircle className="mr-2 size-5" strokeWidth={2.5} />
-            Create a market
-          </button>
+      {/* Buttons. One rule, one breakpoint: stacked full-width while the row is a
+          column, auto-width once it becomes a row — both switch at md:, so the
+          widths can't desync from the direction (they did when the row was md:
+          but a width was sm:). The stacked width is capped at max-w-sm so the
+          640-767px band doesn't get full-bleed buttons on a ~700px viewport;
+          the cap is inert on real phones, where the viewport is already narrower.
+          `mt-6` lives here so the 24px gap below the subtitle stays identical on
+          desktop without double spacing when stacked. */}
+      <div className="mt-6 flex w-full flex-col items-center justify-center gap-4 px-6 md:max-w-xl md:flex-row md:gap-3">
+        <Link
+          href="/create"
+          className="flex w-full max-w-sm items-center justify-center whitespace-nowrap rounded-full bg-[#2D1C00] px-6 py-3 font-sans font-medium tracking-tight text-[#FFF2DD] transition-all hover:scale-102 active:scale-98 cursor-pointer md:w-auto md:max-w-none"
+        >
+          <PlusCircle className="mr-2 size-5" strokeWidth={2.5} />
+          Create a market
         </Link>
         {/* Anchor + smooth scroll: Lenis if running, native jump otherwise.
             href="/#browse" also works cross-page and with JS disabled;
@@ -37,7 +48,7 @@ export const Hero = () => {
           href="/#browse"
           scroll={false}
           onClick={(e) => handleSectionLink(e, "#browse")}
-          className="w-full sm:w-auto py-3 px-6 text-[#2D1C00] font-sans tracking-tight font-medium bg-[#2D1C00]/20 flex items-center justify-center rounded-full hover:scale-102 active:scale-98 transition-all cursor-pointer"
+          className="flex w-full max-w-sm items-center justify-center whitespace-nowrap rounded-full bg-[#2D1C00]/20 px-6 py-3 font-sans font-medium tracking-tight text-[#2D1C00] transition-all hover:scale-102 active:scale-98 cursor-pointer md:w-auto md:max-w-none"
         >
           <Search className="mr-2 size-4" strokeWidth={2.5} />
           Browse markets

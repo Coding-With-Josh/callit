@@ -1,18 +1,24 @@
 /**
- * panta/route-helpers — shared wiring for the public Panta *read* routes.
+ * panta/route-helpers — shared wiring for the server-side Panta routes.
  *
  * Owns: building the client from the server env (fail closed to 503 when the
- * key is absent), mapping a transport error to an HTTP response without leaking
- * internals, and the no-store header.
+ * key is absent), the session guard every route behind it must pass, the
+ * transport-error -> status/message mapping, and the no-store header.
  * Must not import: React.
  *
- * Scope note: only READ routes exist under app/api/panta. The create/buy/claim
- * write routes are deliberately NOT exposed to the browser until the identity
- * (Privy) layer can authenticate callers; the write adapters live as server code
- * and are exercised by tests.
+ * Scope note: every route under app/api/panta is now behind a session guard —
+ * `requirePantaAuth` on the reads (positions, metrics, categories, markets,
+ * markets/[id], trades/[signature]) and the equivalent `requireAuthFromRequest`
+ * on the writes (buy/*, claim/*). They proxy a paid upstream account on a shared
+ * budget, so an unauthenticated caller must not be able to spend it — including
+ * on reads. The Blink endpoints under app/blink/ are the deliberate exception,
+ * and they do NOT import anything from this module except the transport
+ * mapping: they are cookie-free and cross-origin by design, so they carry their
+ * own CORS headers and their own (database-backed) budget instead of a session.
  */
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { pantaClientFromEnv, type PantaClient, type PantaTransportError } from './client';
+import { requireAuthFromRequest, type AuthResult } from '@/lib/auth/require-auth';
 
 /** Every catalog read is live and must not be cached or replayed. */
 export const NO_STORE = {
@@ -40,33 +46,64 @@ export function pantaClientOr503(): PantaRouteReady {
   };
 }
 
+/** The fail-closed 401 every protected Panta route returns. */
+export function unauthorizedResponse(): NextResponse {
+  return NextResponse.json({ error: 'unauthorized' }, { status: 401, headers: NO_STORE });
+}
+
 /**
- * Map a transport error to a response. The body carries only a generic message
- * (or Panta's own user-facing message for a known error) — never the API key,
- * request headers, or a raw upstream body.
+ * Guard a Panta route behind the session identity.
+ *
+ * Phase 1 (complete mediation): the Panta routes proxy a paid, shared-budget
+ * upstream account, so every one of them must be reached by an identified caller
+ * — including reads, which are not free just because they are reads. A caller
+ * that fails the check gets a 401 and NO upstream request is made.
+ *
+ * The guard is applied per route rather than in middleware on purpose: a route
+ * added under app/api/panta/ cannot inherit it, so it cannot silently skip it
+ * either. Being unguarded is visible in the file.
  */
+export async function requirePantaAuth(
+  req: NextRequest,
+): Promise<
+  { readonly auth: Extract<AuthResult, { ok: true }> } | { readonly response: NextResponse }
+> {
+  const auth = await requireAuthFromRequest(req);
+  if (!auth.ok) return { response: unauthorizedResponse() };
+  return { auth };
+}
+
+/**
+ * The HTTP status for a transport error.
+ *
+ * Split out from `transportErrorResponse` so a caller that needs a DIFFERENT
+ * response envelope (the public Actions routes, which must carry CORS headers —
+ * Phase 3: a client whose preflight passed but whose error response omits
+ * `Access-Control-Allow-Origin` fails opaquely) can reuse the same mapping
+ * instead of re-deriving it and drifting.
+ */
+export function transportErrorStatus(error: PantaTransportError): number {
+  if (error.kind === 'http') return error.status >= 500 ? 502 : error.status;
+  if (error.kind === 'timeout') return 504;
+  if (error.kind === 'config') return 503;
+  return 502;
+}
+
+/**
+ * A user-safe message for a transport error. The body carries only this string —
+ * never the API key, request headers, or a raw upstream body.
+ */
+export function transportErrorMessage(error: PantaTransportError): string {
+  if (error.kind === 'http') return error.error.message;
+  if (error.kind === 'timeout') return 'Panta did not respond in time';
+  if (error.kind === 'config') return 'Panta is not configured';
+  return 'Panta request failed';
+}
+
+/** Map a transport error to a response. */
 export function transportErrorResponse(error: PantaTransportError): NextResponse {
-  if (error.kind === 'http') {
-    const status = error.status >= 500 ? 502 : error.status;
-    return NextResponse.json(
-      { error: error.error.message },
-      { status, headers: NO_STORE },
-    );
-  }
-  if (error.kind === 'timeout') {
-    return NextResponse.json(
-      { error: 'Panta did not respond in time' },
-      { status: 504, headers: NO_STORE },
-    );
-  }
-  if (error.kind === 'config') {
-    return NextResponse.json(
-      { error: 'Panta is not configured' },
-      { status: 503, headers: NO_STORE },
-    );
-  }
   return NextResponse.json(
-    { error: 'Panta request failed' },
-    { status: 502, headers: NO_STORE },
+    { error: transportErrorMessage(error) },
+    { status: transportErrorStatus(error), headers: NO_STORE },
   );
 }

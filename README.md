@@ -249,7 +249,7 @@ Numbers are **TBD** and are only ever filled in from real data. They are cross-c
 
 ## Setup
 
-**Prerequisites:** Node.js and **pnpm** (the repo pins `pnpm@11.1.2`). No testnet — this targets Solana **mainnet**.
+**Prerequisites:** Node.js and **pnpm** (the repo pins `pnpm@11.1.2`). No testnet — this targets Solana **mainnet**. For local development only, set `NEXT_PUBLIC_SOLANA_CLUSTER=devnet` to authenticate and sign against Devnet (see the env table).
 
 **Environment variable names** (names only — never commit values):
 
@@ -261,6 +261,7 @@ Numbers are **TBD** and are only ever filled in from real data. They are cross-c
 | `DATABASE_URL` | server-only | Hosted ledger DB |
 | `LLM_API_KEY` | server-only | Market drafting |
 | `NEXT_PUBLIC_APP_URL` | public (`NEXT_PUBLIC_`) | Base URL used in share cards and Blinks |
+| `NEXT_PUBLIC_SOLANA_CLUSTER` | public (`NEXT_PUBLIC_`) | Solana cluster this build authenticates and signs for — `mainnet` (default) or `devnet` (local dev only). Fail-closed: any unrecognised value resolves to `mainnet`. Must match `SOLANA_RPC_URL`'s network |
 
 > The env schema lives in `types/env.ts`, split into `NEXT_PUBLIC_` (public) and server-only keys. Server-only values are never imported by client modules; that boundary is enforced by convention plus a lint rule in the app layer, because TypeScript cannot enforce it.
 

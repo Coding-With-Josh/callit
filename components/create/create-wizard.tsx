@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link2, Loader2, Pencil, Plus, X } from "lucide-react";
 import { usePrivyGate } from "@/components/auth/use-privy-gate";
+import { useSolanaSigner } from "@/components/auth/use-solana-signer";
 import {
   checkResolvabilityStep,
   checkSource,
@@ -31,8 +32,10 @@ import {
   type DataProvenance,
   type RawDraft,
 } from "@/types";
-import { formatAsOf, formatUnixDate, formatUsdc } from "@/lib/format";
+import { formatAsOf, formatSignatureShort, formatUnixDate, formatUsdc } from "@/lib/format";
 import { loadCoverFontCss, templatedCoverDataUri } from "@/lib/create-image";
+import { buildPreviewSelfTransferB64 } from "@/lib/solana/preview-transaction";
+import { describeSignRequestError } from "@/lib/solana/sign-messages";
 import { PantaBadge } from "@/components/market/panta-badge";
 import {
   Select,
@@ -51,10 +54,13 @@ import {
  * validators and transition guards. A revision goes through `editDraft` (a
  * fresh `drafted`), never a hand-built draft.
  *
- * Preview scope (decisions): fixture adapters only; the walk stops at a
- * DISABLED sign step. This island never calls buildStep / signStep, so no
- * transaction is built, no signature is produced, and no market id exists —
- * there is no fake "registered" screen.
+ * Sign-step scope: the fixture walk builds no Panta transaction, so the sign
+ * step signs a REAL but inert preview transaction (a 1-lamport self-transfer
+ * from the user's own wallet — lib/solana/preview-transaction). This exercises
+ * the real signer path end to end, but nothing is broadcast and no market is
+ * registered: the market id never exists. A live create quote/build (Panta)
+ * lands when the create pipeline is wired to the server — see the header of
+ * lib/create-market.ts.
  */
 
 const adapters: CreateAdapters = fixtureCreateAdapters;
@@ -93,16 +99,26 @@ const checksRecord = (
   Object.fromEntries(checks.map((check) => [check.url, check]));
 
 /**
- * The sign step's gate (Phase 1: complete mediation).
+ * The sign step (Phase 1: complete mediation).
  *
- * Connecting a wallet here is an *affordance* only — it grants no server
- * privilege, and this island is never the authority. The server route that will
- * build/sign re-checks auth independently and fails closed. It constructs
- * nothing: live signing stays disabled in preview, so no transaction is built
- * or signed and no market id is fabricated.
+ * Connecting a wallet here is an *affordance* only: it grants no server
+ * privilege, and this island is never the authority. The server routes that
+ * will quote/build/register re-check auth independently and fail closed.
+ *
+ * This signs a REAL transaction with the user's wallet — a 1-lamport
+ * self-transfer built by lib/solana/preview-transaction, whose only required
+ * signer is the session identity wallet. It exercises the exact signer gate the
+ * buy flow uses (lib/solana/sign via use-solana-signer). It is deliberately
+ * unbroadcastable (placeholder blockhash) and moves nothing; no market is
+ * registered. When the live create pipeline lands, this button signs Panta's
+ * build output instead, through the same gate.
  */
 const SignStepButton = () => {
   const { ready, authenticated, unavailable, login } = usePrivyGate();
+  const { wallet, sign, ready: signerReady } = useSolanaSigner();
+  const [busy, setBusy] = useState(false);
+  const [signature, setSignature] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   if (!authenticated) {
     const blocked = unavailable;
@@ -126,16 +142,74 @@ const SignStepButton = () => {
     );
   }
 
+  const signed = signature !== null;
+
+  const onSign = async () => {
+    setError(null);
+    if (!wallet) {
+      setError("Reconnect your wallet to sign.");
+      return;
+    }
+    let b64: string;
+    try {
+      b64 = buildPreviewSelfTransferB64(wallet);
+    } catch {
+      // A malformed identity wallet should be impossible here (the signer gate
+      // validated it) — fail closed rather than prompting with bad bytes.
+      setError("Could not prepare the transaction.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = await sign(b64);
+      if (out.ok) setSignature(out.value.signature);
+      else setError(describeSignRequestError(out.error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disabled = busy || signed || !signerReady;
+
   return (
-    <button
-      type="button"
-      disabled
-      aria-disabled="true"
-      title="Live signing lands with the trading backend"
-      className="w-full cursor-not-allowed rounded-full bg-[#2D1C00]/15 py-3 text-sm font-semibold tracking-tight text-[#2D1C00]/50"
-    >
-      Sign with wallet
-    </button>
+    <div className="flex flex-col gap-3">
+      <button
+        type="button"
+        disabled={disabled}
+        aria-busy={busy}
+        onClick={() => void onSign()}
+        className={`flex w-full items-center justify-center gap-2 rounded-full py-3 text-sm font-semibold tracking-tight transition-transform duration-150 motion-reduce:transition-none ${
+          busy || !signerReady || signed
+            ? "cursor-not-allowed bg-[#2D1C00]/15 text-[#2D1C00]/50"
+            : "bg-[#2D1C00] text-[#FFF2DD] hover:scale-[1.02] active:scale-[0.98]"
+        }`}
+      >
+        {busy && <Loader2 className="size-4 animate-spin" />}
+        {signed ? "Signed ✓" : busy ? "Confirm in your wallet…" : "Sign with wallet"}
+      </button>
+
+      {!signerReady && !signed && (
+        <p className="text-xs leading-relaxed tracking-tight text-[#2D1C00]/55">
+          Reconnect your wallet to sign.
+        </p>
+      )}
+
+      {error && (
+        <p
+          role="alert"
+          className="rounded-xl bg-red-50 px-3 py-2 text-xs font-medium leading-relaxed text-red-800 ring-1 ring-red-200"
+        >
+          {error}
+        </p>
+      )}
+
+      {signed && signature && (
+        <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
+          Signed {formatSignatureShort(signature)} — nothing submitted or
+          registered.
+        </p>
+      )}
+    </div>
   );
 };
 
@@ -892,8 +966,10 @@ export const CreateWizard = () => {
           <Section index={5} title="Sign" state="active">
             <SignStepButton />
             <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
-              Connecting links your wallet. Live signing is still disabled — no
-              transaction is built or signed, and no market is registered.
+              Signing proves your wallet is wired up end to end: your wallet
+              signs a real transaction, but it is a no-op self-transfer that is
+              never broadcast, and no market is registered. Live market creation
+              signs Panta&apos;s own transaction here.
             </p>
           </Section>
         )}

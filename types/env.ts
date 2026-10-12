@@ -16,6 +16,7 @@ import { z } from 'zod';
 export const PUBLIC_ENV_KEYS = [
   'NEXT_PUBLIC_APP_URL',
   'NEXT_PUBLIC_PRIVY_APP_ID',
+  'NEXT_PUBLIC_SOLANA_CLUSTER',
 ] as const;
 export type PublicEnvKey = (typeof PUBLIC_ENV_KEYS)[number];
 
@@ -35,6 +36,11 @@ export type ServerOnlyEnvKey = (typeof SERVER_ONLY_ENV_KEYS)[number];
 export const publicEnvSchema = z.object({
   NEXT_PUBLIC_APP_URL: z.string().optional(),
   NEXT_PUBLIC_PRIVY_APP_ID: z.string().min(1),
+  /**
+   * Solana cluster this build authenticates/signs for. Fail-closed at runtime
+   * too (see lib/solana/cluster.ts): only the literal `devnet` opts in.
+   */
+  NEXT_PUBLIC_SOLANA_CLUSTER: z.enum(['devnet', 'mainnet']).optional().default('mainnet'),
 });
 export type PublicEnv = z.infer<typeof publicEnvSchema>;
 

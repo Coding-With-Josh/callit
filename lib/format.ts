@@ -57,3 +57,14 @@ export function formatUsdc(usdc: UsdcDecimal): string {
 export function formatPriceUsdc(price: Price): string {
   return formatUsdc(price as unknown as UsdcDecimal);
 }
+
+/**
+ * A base58 transaction signature for a receipt-style confirmation line:
+ * the first and last 8 characters with an ellipsis ("3Jp9C1tK…HXhDD3F").
+ * Pure string slicing — a short/odd signature is returned unchanged rather
+ * than coerced, so this can never throw into a render.
+ */
+export function formatSignatureShort(signature: string): string {
+  if (signature.length <= 20) return signature;
+  return `${signature.slice(0, 8)}…${signature.slice(-8)}`;
+}

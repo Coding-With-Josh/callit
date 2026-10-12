@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUpRightFromSquare } from "lucide-react";
+import { ArrowUpRightFromSquare, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import {
@@ -16,7 +16,14 @@ import {
   type MarketLinkOut,
   type Side,
 } from "@/types";
-import { formatAsOf, percentFromPrice } from "@/lib/format";
+import {
+  formatAsOf,
+  formatPriceUsdc,
+  formatSignatureShort,
+  formatUsdc,
+  percentFromPrice,
+} from "@/lib/format";
+import { useBuyOrder, type BuyOrderController, type BuyOrderStatus } from "./use-buy-order";
 import { PantaBadge } from "./panta-badge";
 
 interface TradeDeckProps {
@@ -27,11 +34,39 @@ interface TradeDeckProps {
 
 /**
  * The buy CTA's gate (Phase 1: complete mediation). Connecting is an affordance
- * only — it grants no server privilege, and the server route that will
- * build/sign re-checks auth independently and fails closed. This component never
- * builds or signs anything: live signing stays disabled in preview.
+ * only — it grants no server privilege, and the server routes that quote/build
+ * re-check the session and re-derive the wallet independently.
+ *
+ * Two steps, deliberately (Phase 3: fee disclosure before signing):
+ *  1. `Review order` fetches a quote and prepares an unsigned transaction; the
+ *     slip then shows the real shares/price/fee from that quote.
+ *  2. `Sign with wallet` prompts the wallet for the prepared bytes.
+ * Nothing is submitted or broadcast; the signature is shown and the flow stops.
  */
-const TradeActionButton = ({ side }: { side: Side }) => {
+const CTA_LABEL: Record<BuyOrderStatus, string> = {
+  idle: "Review order",
+  quoting: "Getting quote…",
+  building: "Preparing order…",
+  ready: "Sign with wallet",
+  signing: "Confirm in your wallet…",
+  signed: "Signed ✓",
+};
+
+/** True while a quote/build/sign request is in flight (inputs are frozen). */
+const isBuyBusy = (status: BuyOrderStatus): boolean =>
+  status === "quoting" || status === "building" || status === "signing";
+
+const BuyCta = ({
+  side,
+  amountValid,
+  buy,
+  onPrepare,
+}: {
+  side: Side;
+  amountValid: boolean;
+  buy: BuyOrderController;
+  onPrepare: () => void;
+}) => {
   const { ready, authenticated, unavailable, login } = usePrivyGate();
 
   if (!authenticated) {
@@ -58,15 +93,28 @@ const TradeActionButton = ({ side }: { side: Side }) => {
     );
   }
 
+  const busy = isBuyBusy(buy.status);
+  const signed = buy.status === "signed";
+  const canConfirm = buy.status === "ready";
+  const disabled = busy || signed || !amountValid || !ready;
+
   return (
     <button
       type="button"
-      disabled
-      aria-disabled="true"
-      title="Live signing lands with the trading backend"
-      className="mt-5 w-full cursor-not-allowed rounded-full bg-[#2D1C00]/15 py-3 text-sm font-semibold tracking-tight text-[#2D1C00]/50"
+      disabled={disabled}
+      aria-busy={busy}
+      onClick={() => {
+        if (canConfirm) void buy.confirm();
+        else onPrepare();
+      }}
+      className={`mt-5 flex w-full items-center justify-center gap-2 rounded-full py-3 text-sm font-semibold tracking-tight transition-transform duration-150 motion-reduce:transition-none ${
+        disabled
+          ? "cursor-not-allowed bg-[#2D1C00]/15 text-[#2D1C00]/50"
+          : "bg-[#2D1C00] text-[#FFF2DD] hover:scale-[1.02] active:scale-[0.98]"
+      }`}
     >
-      Sign with wallet
+      {busy && <Loader2 className="size-4 animate-spin" />}
+      {CTA_LABEL[buy.status]}
     </button>
   );
 };
@@ -242,9 +290,13 @@ const SideButton = ({
 
 /**
  * The buy slip — receipt-styled: perforated top edge, mono money, dot-leader
- * rows. Preview structure only: NO quote, NO builder, NO signing; the CTA is
- * disabled and this component never constructs a transaction. The fee row is
- * the fixture estimate from feeDisclosure, shown above the CTA (Phase 3:
+ * rows. Two-step: `Review order` runs the quote/build/assemble pipeline (via
+ * useBuyOrder) and fills in the real shares/price/fee; `Sign with wallet` then
+ * signs the prepared bytes. Nothing is submitted or broadcast.
+ *
+ * The amount is validated at the perimeter (usdcDecimalSchema) before it can
+ * reach a quote. The fee row shows Panta's real quote fee once prepared and a
+ * dash before — a fabricated estimate is never displayed (Phase 3:
  * fee-disclosure ordering).
  */
 const BuySlip = ({
@@ -260,23 +312,25 @@ const BuySlip = ({
   onSelectSide: (side: Side) => void;
 }) => {
   const [amount, setAmount] = useState("");
+  const buy = useBuyOrder();
 
   // Independent phase guard: even if this component were ever composed onto
   // a non-primary market, it renders nothing (fail-closed deny).
   const guard = requirePrimaryMarket(market);
   if (!guard.ok) return null;
+  const primary = guard.value;
 
-  // Perimeter validation: the amount is checked against the USDC schema
-  // before it could ever feed a quote. Preview-only for now.
+  // Perimeter validation: the amount is checked against the USDC schema before
+  // it can feed a quote or enable the CTA.
   const amountResult = usdcDecimalSchema.safeParse(amount);
   const amountInvalid = amount.length > 0 && !amountResult.success;
+  const busy = isBuyBusy(buy.status);
 
-  const fee = feeDisclosure(
-    "buy",
-    "Panta buy fee (est.)",
-    usdcDecimalSchema.parse("1.5"),
-    readAt,
-  );
+  // The fee comes from the real quote once one exists; before that there is no
+  // number to show (a fabricated estimate is never displayed).
+  const fee = buy.quote
+    ? feeDisclosure("buy", "Panta buy fee", buy.quote.feeUsdc, readAt)
+    : null;
 
   return (
     <section
@@ -306,15 +360,20 @@ const BuySlip = ({
         </span>
       </div> */}
 
-      {/* Side selector — mirrors the board selection. */}
+      {/* Side selector — mirrors the board selection. Frozen while a request
+          is in flight so a switch cannot race an in-flight quote. */}
       <div className="mt-4 grid grid-cols-2 gap-2">
         {SIDES.map((s) => (
           <button
             key={s}
             type="button"
-            onClick={() => onSelectSide(s)}
+            disabled={busy}
+            onClick={() => {
+              onSelectSide(s);
+              buy.reset();
+            }}
             aria-pressed={side === s}
-            className={`cursor-pointer rounded-full py-2 font-mono text-xs font-semibold uppercase tracking-[0.18em] transition-colors duration-150 motion-reduce:transition-none ${
+            className={`cursor-pointer rounded-full py-2 font-mono text-xs font-semibold uppercase tracking-[0.18em] transition-colors duration-150 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 ${
               side === s
                 ? "bg-[#2D1C00] text-[#FFF2DD]"
                 : "bg-[#2D1C00]/5 text-[#2D1C00]/60 hover:bg-[#2D1C00]/10"
@@ -337,12 +396,18 @@ const BuySlip = ({
         inputMode="decimal"
         autoComplete="off"
         spellCheck={false}
+        disabled={busy}
         value={amount}
-        onChange={(e) => setAmount(e.target.value)}
+        onChange={(e) => {
+          setAmount(e.target.value);
+          // A prepared/signed order is for the old amount; drop it so the CTA
+          // never signs bytes that no longer match the field.
+          if (buy.status === "ready" || buy.status === "signed") buy.reset();
+        }}
         placeholder="0.00"
         aria-label="Amount in USDC"
         aria-invalid={amountInvalid || undefined}
-        className="mt-2 w-full rounded-full bg-[#2D1C00]/5 px-4 py-3 font-tusker-6700 text-lg font-semibold tracking-tight text-[#2D1C00] placeholder:text-[#2D1C00]/35 outline-none ring-1 ring-[#2D1C00]/10 transition focus:ring-2 focus:ring-[#2D1C00]/30"
+        className="mt-2 w-full rounded-full bg-[#2D1C00]/5 px-4 py-3 font-tusker-6700 text-lg font-semibold tracking-tight text-[#2D1C00] placeholder:text-[#2D1C00]/35 outline-none ring-1 ring-[#2D1C00]/10 transition focus:ring-2 focus:ring-[#2D1C00]/30 disabled:opacity-60"
       />
       {amountInvalid && (
         <p className="mt-2 text-xs font-medium text-red-700" role="alert">
@@ -350,22 +415,47 @@ const BuySlip = ({
         </p>
       )}
 
-      {/* Estimate rows — placeholder dashes: real values come from a quote,
-          and a fabricated estimate is never shown. */}
+      {/* Estimate rows — real values from the quote once prepared; a fabricated
+          estimate is never shown before the quote exists. */}
       <dl className="mt-5 space-y-2.5 border-t border-[#2D1C00]/10 pt-4 text-sm">
-        <SlipRow label="Est. shares" value="—" />
-        <SlipRow label="Avg price" value="—" />
+        <SlipRow label="Est. shares" value={buy.quote ? buy.quote.shares : "—"} />
         <SlipRow
-          label={fee.label}
-          value={`$${fee.amountUsdc}`}
-          note={`fee as of ${formatAsOf(fee.shownAt)}`}
+          label="Avg price"
+          value={buy.quote ? formatPriceUsdc(buy.quote.avgPrice) : "—"}
+        />
+        <SlipRow
+          label="Panta buy fee"
+          value={fee ? formatUsdc(fee.amountUsdc) : "—"}
+          note={fee ? `as of ${formatAsOf(fee.shownAt)}` : undefined}
         />
       </dl>
 
-      <TradeActionButton side={side} />
+      <BuyCta
+        side={side}
+        amountValid={amountResult.success}
+        buy={buy}
+        onPrepare={() => void buy.prepare(primary.marketId, side, amount)}
+      />
+
+      {buy.error && (
+        <p
+          role="alert"
+          className="mt-3 rounded-xl bg-red-50 px-3 py-2 text-xs font-medium leading-relaxed text-red-800 ring-1 ring-red-200"
+        >
+          {buy.error}
+        </p>
+      )}
+
+      {buy.status === "signed" && buy.signature && (
+        <p className="mt-3 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
+          Signed {formatSignatureShort(buy.signature)} — not submitted.
+        </p>
+      )}
+
       <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
-        Connecting links your wallet. No transaction is built or signed in
-        preview.
+        {buy.status === "signed"
+          ? "Your signature is ready. Submitting to Panta is not enabled here — nothing was broadcast."
+          : "Review fetches a live quote from Panta and prepares the order. Nothing is charged until you sign, and nothing is submitted here."}
       </p>
 
       <div className="mt-4 flex items-center justify-between border-t border-[#2D1C00]/10 pt-3">

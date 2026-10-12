@@ -1,15 +1,20 @@
 /**
- * GET /api/panta/markets/{id} — a single public market.
+ * GET /api/panta/markets/{id} — a single market.
  *
  * The [id] is validated against a strict charset before it is ever placed in a
  * Panta URL path (never URL-encoded into a path we do not control). A
  * non-conforming id is a 404, not a 400 — an enumeration probe learns nothing.
+ *
+ * Phase 1 (complete mediation): a session is required, and the guard runs BEFORE
+ * the charset test (Phase 3: G1), so an anonymous caller cannot learn the id
+ * charset from a 404-vs-401 difference, nor spend the shared read budget.
  */
-import { NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 import { fetchMarket } from '@/lib/panta/read-adapters';
 import {
   NO_STORE,
   pantaClientOr503,
+  requirePantaAuth,
   transportErrorResponse,
 } from '@/lib/panta/route-helpers';
 
@@ -19,9 +24,15 @@ const MARKET_ID = /^[A-Za-z0-9_-]{1,128}$/;
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   context: RouteContext,
 ): Promise<NextResponse> {
+  const ready = pantaClientOr503();
+  if ('response' in ready) return ready.response;
+
+  const guard = await requirePantaAuth(request);
+  if ('response' in guard) return guard.response;
+
   const { id } = await context.params;
 
   // Phase 3 (path injection / enumeration): reject before touching the network.
@@ -31,9 +42,6 @@ export async function GET(
       { status: 404, headers: NO_STORE },
     );
   }
-
-  const ready = pantaClientOr503();
-  if ('response' in ready) return ready.response;
 
   const result = await fetchMarket(ready.client, id);
   if (!result.ok) return transportErrorResponse(result.error);

@@ -10,7 +10,7 @@
  * only a PrimaryMarket, so a secondary/resolved market cannot start a buy.
  */
 import { err, ok, type Result } from './result';
-import type { QuoteId, OrderId, TxSignature, MarketId } from './ids';
+import type { QuoteId, OrderId, TxSignature, MarketId, WalletAddress } from './ids';
 import type { Price, Shares, UsdcDecimal } from './money';
 import type { UnixSeconds } from './time';
 import type { PrimaryMarket, Side } from './market';
@@ -28,9 +28,29 @@ export interface BuyQuote {
   readonly expiresAt: UnixSeconds;
 }
 
-/** A built order: Panta's instructions plus the blockhash window. */
+/**
+ * A built order: Panta's instructions plus the blockhash window.
+ *
+ * The identity fields (`quoteId`, `marketId`, `side`, `wallet`, `amountUsdc`)
+ * are Panta's OWN echo of what it built. They are carried into the domain on
+ * purpose: the unauthenticated Blink POST hands these bytes to a stranger's
+ * wallet, and the only way to catch an upstream that answered a different order
+ * than the one requested is to compare its echo against the request (Phase 3:
+ * parameter substitution by a confused upstream). Dropping them would make that
+ * check impossible at the point it matters.
+ */
 export interface BuiltOrder {
   readonly orderId: OrderId;
+  /** Panta's echo of the quote this order was built from. */
+  readonly quoteId: QuoteId;
+  /** Panta's echo of the market. Must equal the requested market. */
+  readonly marketId: MarketId;
+  /** Panta's echo of the side. Must equal the requested side. */
+  readonly side: Side;
+  /** Panta's echo of the paying wallet. Must equal the request `account`. */
+  readonly wallet: WalletAddress;
+  /** Panta's echo of the amount. Compared in BASE UNITS, never as a string. */
+  readonly amountUsdc: UsdcDecimal;
   readonly instructions: readonly RawInstruction[];
   readonly recentBlockhash: string;
   readonly lastValidBlockHeight: number;

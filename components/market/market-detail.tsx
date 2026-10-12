@@ -9,6 +9,7 @@ import { type MarketFixture } from "@/lib/market-fixtures";
 import { formatUnixDate, formatUsdc } from "@/lib/format";
 import { type Market, type MarketPhase } from "@/types";
 import { PantaBadge } from "./panta-badge";
+import { ShareMenu } from "./share-menu";
 import { TradeDeck } from "./trade-deck";
 
 /**
@@ -42,8 +43,8 @@ export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
           but with the market's real phase and yes-price. It reads as the
           market's identity; the h1 below keeps the claim as real text for
           SEO/screen readers (the card is an image). */}
-      <figure className="mt-8 max-w-3xl">
         {/* eslint-disable-next-line @next/next/no-img-element -- SVG data URI, not a remote/optimisable asset. */}
+      {/* <figure className="mt-8 max-w-3xl">
         <img
           src={cardSrc}
           alt={market.title}
@@ -51,10 +52,10 @@ export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
           height={630}
           className="w-full rounded-[24px] ring-1 ring-[#2D1C00]/10"
         />
-      </figure>
+      </figure> */}
 
       <header className="mt-10 max-w-3xl">
-        <div className="flex items-center justify-start gap-3">
+        <div className="flex flex-wrap items-center justify-start gap-3">
           <div className="flex items-center justify-center rounded-full px-3 py-1 bg-[#2D1C00]">
             <p className="text-xs font-semibold tracking-tight text-[#FFF2DD]">
               {PHASE_LABELS[market.phase]}
@@ -65,6 +66,9 @@ export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
               {market.category}
             </p>
           </div>
+          {/* Share island: client-side menu over server-validated market data
+              (id + title come from the loaded market, not raw params). */}
+          <ShareMenu marketId={market.marketId} title={market.title} />
         </div>
 
         <h1 className="mt-5 font-tusker-9800 text-4xl leading-[1.1] md:leading-[1.02] tracking-tight text-[#2D1C00] md:text-5xl">
@@ -110,7 +114,7 @@ const PHASE_LABELS: Record<MarketPhase, string> = {
 const MarketMeta = ({ market }: { market: Market }) => (
   <dl
     aria-label="Market facts"
-    className="mt-18 grid grid-cols-2 gap-x-6 gap-y-7 sm:grid-cols-4"
+    className="mt-20 grid grid-cols-2 gap-x-6 gap-y-7 sm:grid-cols-4"
   >
     <MetaItem label="Open since" value={formatUnixDate(market.startTime)} />
     <MetaItem label="Closes" value={formatUnixDate(market.endTime)} />
@@ -134,7 +138,7 @@ const MetaItem = ({ label, value }: { label: string; value: string }) => (
 const ResolutionRules = () => (
   <section
     aria-label="Resolution rules"
-    className="mt-14 max-w-3xl border-l-2 border-[#2D1C00]/15 pl-6"
+    className="mt-20 max-w-3xl border-l-2 border-[#2D1C00]/15 pl-6"
   >
     <h2 className="font-tusker-9800 text-2xl tracking-tight text-[#2D1C00]">
       How does this resolve?

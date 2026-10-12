@@ -21,8 +21,10 @@
  * if that account is not currently connected we fail closed (`no-wallet`)
  * rather than silently signing with any other wallet.
  *
- * Phase 3 (devnet drift): the chain is pinned to `solana:mainnet` — the
- * product is mainnet-only and this file never signs for devnet/testnet.
+ * Phase 3 (devnet drift): the chain comes from the single configured cluster
+ * (`SOLANA_CHAIN`), defaulting to `solana:mainnet` — the product is mainnet-only
+ * and a build only carries a devnet chain when `NEXT_PUBLIC_SOLANA_CLUSTER` is
+ * explicitly `devnet` for local development.
  */
 'use client';
 
@@ -35,6 +37,7 @@ import { useCallback, useMemo } from 'react';
 import { err, ok, type Result } from '@/types';
 import type { WalletAddress } from '@/types';
 import { useWallet } from './use-wallet';
+import { SOLANA_CHAIN } from '@/lib/solana/cluster';
 import {
   decodeUnsignedTransactionB64,
   extractSignatureFromSigned,
@@ -140,7 +143,7 @@ export function useSolanaSigner(): SolanaSigner {
       }
 
       // 4. Prompt the user's wallet via its wallet-standard feature.
-      //    Mainnet-only, per the product model.
+      //    Chain follows the configured cluster (mainnet by default).
       const signTransactionFeature = connected.wallet.features['solana:signTransaction'];
       if (!signTransactionFeature) {
         return err({
@@ -154,7 +157,7 @@ export function useSolanaSigner(): SolanaSigner {
         const [out] = await signTransactionFeature.signTransaction({
           account: connected.account,
           transaction: bytes,
-          chain: 'solana:mainnet',
+          chain: SOLANA_CHAIN,
         });
         signedTransaction = out.signedTransaction;
       } catch (e) {

@@ -56,3 +56,28 @@ export const actionErrorSchema = z.object({
   message: z.string(),
 });
 export type ActionError = z.infer<typeof actionErrorSchema>;
+
+/**
+ * One rule in the domain-level `actions.json`.
+ *
+ * `pathPattern` is the URL a client or crawler may see; `apiPath` is where the
+ * Action API for it lives. Both must be absolute URL paths. The spec resolves
+ * `pathPattern` before following the URL, so a rule is how a plain share link
+ * (no `solana-action:` scheme) is recognised as a Blink at all.
+ *
+ * Both are validated as single-slash paths here (Phase 3: SSRF/redirect — a
+ * rule is a statement about OUR OWN origin; a value that could carry a host or
+ * a `//` protocol-relative form would turn actions.json into an open redirect
+ * for every Blink client that trusts it).
+ */
+export const actionRuleSchema = z.object({
+  pathPattern: z.string().regex(/^\/(?!\/)[A-Za-z0-9\-._~/**]*$/, 'expected an absolute URL path'),
+  apiPath: z.string().regex(/^\/(?!\/)[A-Za-z0-9\-._~/**]*$/, 'expected an absolute URL path'),
+});
+export type ActionRule = z.infer<typeof actionRuleSchema>;
+
+/** The `actions.json` document: at least one rule, never zero. */
+export const actionsJsonSchema = z.object({
+  rules: z.array(actionRuleSchema).min(1),
+});
+export type ActionsJson = z.infer<typeof actionsJsonSchema>;
