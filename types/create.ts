@@ -42,6 +42,15 @@ export type CreateStage =
   | 'imaged'
   | 'quoted'
   | 'built'
+  /**
+   * A built transaction whose blockhash window has passed. NOT a failure: the
+   * build is a disposable payload, and the only honest thing to do with a stale
+   * one is to replace it. It is a stage (rather than an error) so that the
+   * machine can express "the payload died, the create session did not" — which
+   * is what lets the send step refuse to prompt the wallet and then recover
+   * legally.
+   */
+  | 'build_expired'
   | 'signed'
   | 'broadcast'
   | 'registered'
@@ -57,6 +66,7 @@ export type CreateLifecycle =
   | { readonly status: 'imaged'; readonly draft: ResolvableDraft; readonly imageUrl: string }
   | { readonly status: 'quoted'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote }
   | { readonly status: 'built'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly build: CreateBuild }
+  | { readonly status: 'build_expired'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly at: UnixSeconds }
   | { readonly status: 'signed'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly build: CreateBuild; readonly signature: TxSignature; readonly signedAt: UnixSeconds }
   | { readonly status: 'broadcast'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly build: CreateBuild; readonly signature: TxSignature; readonly signedAt: UnixSeconds; readonly broadcastAt: UnixSeconds }
   | { readonly status: 'registered'; readonly draft: ResolvableDraft; readonly quote: CreateQuote; readonly marketId: MarketId; readonly registeredAt: UnixSeconds }
@@ -71,11 +81,26 @@ export const CREATE_TRANSITIONS: Readonly<Record<CreateStage, readonly CreateSta
   resolvable: ['imaged', 'quoted', 'create_expired', 'failed'],
   imaged: ['quoted', 'create_expired', 'failed'],
   quoted: ['built', 'create_expired', 'duplicate_market', 'failed'],
-  built: ['broadcast', 'signed', 'create_expired', 'failed'],
+  // `built` carries a DISPOSABLE payload with a ~60s blockhash window. It may
+  // move to `build_expired` (the window closed) and, from there, only back to
+  // `built` with a REPLACEMENT build. There is still no edge from `broadcast` or
+  // `signed` back to here: re-signing an already-submitted transaction is how a
+  // user gets charged twice (Phase 3: double spend by re-sign), and the refresh
+  // edge below is only open BEFORE anything has been submitted.
+  built: ['broadcast', 'signed', 'build_expired', 'create_expired', 'failed'],
+  build_expired: ['built', 'create_expired', 'failed'],
   // `signed` is the sign-ONLY path: held for the transport that signs without
   // sending. A signature alone is never sufficient to register, so the only way
   // on from here is to actually put the transaction on-chain.
-  signed: ['broadcast', 'duplicate_market', 'failed'],
+  //
+  // `build_expired` is reachable from here because the signature is over a
+  // specific set of bytes: if that build's blockhash window has closed, the
+  // signature is worthless AND nothing was ever submitted, so the only honest
+  // move is to drop it and replace the payload. `broadcastStep` therefore
+  // refuses from `signed` too, and the table must permit the state it returns.
+  // This is NOT a path back to re-signing something already sent: `broadcast`
+  // and `registered` still have no edge here.
+  signed: ['broadcast', 'build_expired', 'duplicate_market', 'failed'],
   // `broadcast` is the state that MATTERS for honesty: the transaction is (or is
   // being handed to) the network, so the market may already exist and the fee
   // may already have moved. There is deliberately NO edge back to `built` or

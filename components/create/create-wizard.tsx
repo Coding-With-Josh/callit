@@ -106,6 +106,14 @@ const checksRecord = (
   Object.fromEntries(checks.map((check) => [check.url, check]));
 
 /**
+ * The two things the submit button can be doing. Kept as constants because the
+ * button label and the explanatory paragraph below it must agree, and a stale
+ * rebuild must never be described as "confirm in your wallet".
+ */
+const SUBMIT_REFRESHING = "Refreshing the transaction…";
+const SUBMIT_CONFIRMING = "Confirm in your wallet…";
+
+/**
  * Step 05 — the real submit step (Phase 1: complete mediation).
  *
  * Connecting a wallet here is an *affordance* only: it grants no server
@@ -115,10 +123,15 @@ const checksRecord = (
  * transaction's ONLY required signer is the session identity wallet before the
  * wallet is prompted.
  *
- * Phase 3 (stale build): "prepare" and "submit" are two deliberate actions. The
- * build's blockhash window is re-checked by the pipeline's `buildStep` before the
- * wallet is ever prompted, so a user who lingered on the review step cannot sign
- * an expired transaction.
+ * Phase 3 (stale build): "prepare" and "submit" are two deliberate actions, so
+ * the gap between them is human-paced. Panta's blockhash window is only ~60s
+ * (`blockhashExpiryHintSec`, live-verified), which a normal read of the fee can
+ * exceed — so `broadcastStep` REFUSES to prompt the wallet with a stale build
+ * and returns `build_expired` instead. Because a rebuild is free and reuses the
+ * same quote (the only fee authority, so no unseen fee is ever signed), the
+ * submit handler replaces the payload and submits in the SAME tap. The window
+ * is therefore never human-paced, and the wallet is never asked to send a
+ * transaction that cannot land.
  *
  * The button below is the ONLY thing in this app that spends: the wallet signs
  * Panta's create transaction AND hands it to the network in one prompt
@@ -128,12 +141,20 @@ const checksRecord = (
 const SignStep = ({
   phase,
   busy,
+  busyNote,
   fee,
   onBuild,
   onSubmit,
 }: {
   phase: "quoted" | "built";
   busy: boolean;
+  /**
+   * What the button is doing while `busy`. Passed in because the submit action
+   * can be doing either of two things — refreshing a stale transaction or
+   * waiting on the wallet — and claiming the wallet prompt is open while we are
+   * still rebuilding would be a false claim.
+   */
+  busyNote?: string;
   /** The quoted creation fee, as domain copy. Shown on the submit button. */
   fee: string;
   onBuild: () => void;
@@ -195,6 +216,13 @@ const SignStep = ({
         on-chain and moves{" "}
         <span className="font-semibold">{fee} USDC</span> from your wallet.
       </p>
+      {busyNote === SUBMIT_REFRESHING && (
+        <p className="text-xs leading-relaxed tracking-tight text-[#2D1C00]/55">
+          The prepared transaction outlived Panta&apos;s short signing window, so
+          it is being rebuilt from the same quote — same fee — before your wallet
+          is asked. Nothing has been sent.
+        </p>
+      )}
       <button
         type="button"
         disabled={disabled}
@@ -207,7 +235,7 @@ const SignStep = ({
         }`}
       >
         {busy && <Loader2 className="size-4 animate-spin" />}
-        {busy ? "Confirm in your wallet…" : `Create market — ${fee} USDC`}
+        {busy ? (busyNote ?? "Confirm in your wallet…") : `Create market — ${fee} USDC`}
       </button>
 
       {!signerReady && (
@@ -288,6 +316,11 @@ export const CreateWizard = () => {
   const [lifecycle, setLifecycle] = useState<CreateLifecycle | null>(null);
   const [error, setError] = useState<CreateMarketError | null>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * What the submit action is currently doing, for honest button copy. Null
+   * means idle. Set inside the submit handler, cleared when it settles.
+   */
+  const [submitNote, setSubmitNote] = useState<string | null>(null);
   const [coverUrl, setCoverUrl] = useState<string | null>(null);
   const [categories, setCategories] = useState<readonly string[]>([]);
   const [showDates, setShowDates] = useState(false);
@@ -409,6 +442,13 @@ export const CreateWizard = () => {
       case "create_expired":
         return 3;
       case "built":
+        return 4;
+      // A stale transaction sits on the SAME step as a fresh one: the quote is
+      // still live and the user is still reviewing the fee — only the disposable
+      // payload needs replacing, which the submit action does itself. Without
+      // this case it would hit `default` and the indicator would jump back to the
+      // start of the wizard.
+      case "build_expired":
         return 4;
       // `broadcast` is "submitted, being reported to Panta", so the flow sits ON
       // "Create". `signed` (sign-only) has not reached the network at all and sits
@@ -558,22 +598,76 @@ export const CreateWizard = () => {
 
   /**
    * built -> broadcast. THE submission: the pipeline's `broadcastStep` checks the
-   * transition, and the adapter's `broadcastCreate` asks the wallet to sign AND
-   * send in one prompt (the signer gate runs before the wallet sees the bytes).
+   * transition AND refuses to prompt the wallet with a stale build, and the
+   * adapter's `broadcastCreate` asks the wallet to sign AND send in one prompt
+   * (the signer gate runs before the wallet sees the bytes).
    *
    * This is the only path to a wallet prompt, and therefore the only way money
    * can move in this app.
+   *
+   * Phase 3 (stale-payload replay): a `built` lifecycle holds a DISPOSABLE
+   * transaction whose blockhash is good for only ~60s. "Prepare" and "submit"
+   * are separate taps, so a user reading the fee can easily outlive it.
+   * `broadcastStep` catches that (it returns `build_expired` and never calls the
+   * wallet). Here we recover inside the SAME tap: rebuild, then submit. The
+   * rebuild reuses the same quote, so the fee the user approved is unchanged — a
+   * NEW quote is never auto-approved, because that could prompt the wallet for a
+   * fee the user never saw.
+   *
+   * Bounded to two attempts: one for a payload that was already stale on press,
+   * one for a payload that dies in the gap between the freshness check and the
+   * wallet. If it is stale again the state is left as `build_expired` and the
+   * user presses again — we never loop on the wallet prompt.
    */
   const onBroadcastTransaction = () =>
     run(async () => {
-      if (!lifecycle || lifecycle.status !== "built") return;
-      setError(null);
-      const broadcast = await broadcastStep(lifecycle, adapters);
-      if (!broadcast.ok) {
-        setError(broadcast.error);
+      if (!lifecycle) return;
+      if (lifecycle.status !== "built" && lifecycle.status !== "build_expired") {
         return;
       }
-      setLifecycle(broadcast.value);
+      setError(null);
+
+      let current: CreateLifecycle = lifecycle;
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          if (current.status === "build_expired") {
+            // Only claim we are refreshing when we actually are. On a build that
+            // is still fresh this branch never runs, so the button goes straight
+            // to "confirm in your wallet" and never says anything untrue.
+            setSubmitNote(SUBMIT_REFRESHING);
+            const rebuilt = await buildStep(current, adapters);
+            if (!rebuilt.ok) {
+              setError(rebuilt.error);
+              return;
+            }
+            current = rebuilt.value;
+            // `create_expired` (the quote itself is gone) is terminal: there is
+            // no safe rebuild, and a fresh quote carries a fresh fee that must
+            // be re-approved rather than signed under the old one.
+            if (current.status !== "built") {
+              setLifecycle(current);
+              return;
+            }
+          }
+          setSubmitNote(SUBMIT_CONFIRMING);
+          const broadcast = await broadcastStep(current, adapters);
+          if (!broadcast.ok) {
+            setError(broadcast.error);
+            return;
+          }
+          current = broadcast.value;
+          if (current.status !== "build_expired") {
+            setLifecycle(current);
+            return;
+          }
+          // Fell through: the payload died again. Go round once more (rebuild).
+        }
+        // Still stale after a fresh build: leave it on screen and let the user
+        // press again rather than looping on the wallet prompt.
+        setLifecycle(current);
+      } finally {
+        setSubmitNote(null);
+      }
     });
 
   /**
@@ -616,8 +710,16 @@ export const CreateWizard = () => {
   const quoteReached = status === "quoted" || status === "create_expired";
 
   // Narrowed phase for the submit step. Null means the flow has not reached §05.
+  // `build_expired` renders as "built": the quote (and therefore the fee) is
+  // still live and valid, only the disposable transaction needs replacing — and
+  // the submit action does that itself, so the money button is the right control
+  // to show.
   const submitPhase: "quoted" | "built" | null =
-    status === "quoted" || status === "built" ? status : null;
+    status === "quoted"
+      ? "quoted"
+      : status === "built" || status === "build_expired"
+        ? "built"
+        : null;
 
   /**
    * The quoted fee, rendered on the submit button itself. The fee authority is
@@ -628,6 +730,7 @@ export const CreateWizard = () => {
     lifecycle &&
     (lifecycle.status === "quoted" ||
       lifecycle.status === "built" ||
+      lifecycle.status === "build_expired" ||
       lifecycle.status === "signed" ||
       lifecycle.status === "broadcast")
       ? formatUsdc(lifecycle.quote.paymentUsdc)
@@ -1154,6 +1257,7 @@ export const CreateWizard = () => {
             <SignStep
               phase={submitPhase}
               busy={busy}
+              busyNote={submitNote ?? undefined}
               fee={signFee ?? ""}
               onBuild={onBuildTransaction}
               onSubmit={onBroadcastTransaction}

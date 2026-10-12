@@ -340,7 +340,11 @@ export async function buildStep(
 ): Promise<Result<CreateLifecycle, CreateMarketError>> {
   const blocked = guardTransition(lifecycle, "built");
   if (blocked) return err(blocked);
-  if (lifecycle.status !== "quoted") {
+  // `build_expired` is accepted so a stale payload can be REPLACED (Phase 3:
+  // stale-payload replay). Rebuilding is free and changes nothing the user was
+  // shown: it reuses the SAME quote, so `paymentUsdc` — the only fee authority —
+  // is unchanged and no re-approval is implied.
+  if (lifecycle.status !== "quoted" && lifecycle.status !== "build_expired") {
     return err({
       kind: "invalid_transition",
       from: lifecycle.status,
@@ -381,6 +385,20 @@ export async function signStep(
       to: "signed",
     });
   }
+  // Same freshness guard as `broadcastStep`, for the same reason: a signature
+  // over a transaction whose blockhash has expired can never land, so asking the
+  // wallet for one is a pointless prompt (Phase 3: stale-payload replay). The
+  // invariant is uniform — no wallet prompt over a stale build, on ANY path.
+  const signedAt = adapters.now();
+  if (isExpired(lifecycle.build.buildExpiresAt, signedAt)) {
+    return ok({
+      status: "build_expired",
+      draft: lifecycle.draft,
+      imageUrl: lifecycle.imageUrl,
+      quote: lifecycle.quote,
+      at: signedAt,
+    });
+  }
   let signature: TxSignature;
   try {
     signature = await adapters.signCreate(lifecycle.build);
@@ -419,6 +437,27 @@ export async function broadcastStep(
       kind: "invalid_transition",
       from: lifecycle.status,
       to: "broadcast",
+    });
+  }
+  // Phase 3 (stale-payload replay) — THE guard. `built` is a state; the
+  // transaction inside it is a payload with a ~60s blockhash window
+  // (`blockhashExpiryHintSec`, live-verified). "Prepare" and "submit" are two
+  // deliberate user actions, so the gap between them is human-paced and
+  // routinely exceeds that window. Without this check the wallet is prompted,
+  // the bytes are broadcast against a dead blockhash, and the user gets
+  // `-32002 Blockhash not found` from their RPC with no way to tell whether the
+  // fee moved. Returning here means NO adapter call, so no prompt and no bytes.
+  //
+  // This is the ONLY spend path in the app, which is why the check belongs here
+  // and not only in the UI: any future caller inherits it.
+  const checkedAt = adapters.now();
+  if (isExpired(lifecycle.build.buildExpiresAt, checkedAt)) {
+    return ok({
+      status: "build_expired",
+      draft: lifecycle.draft,
+      imageUrl: lifecycle.imageUrl,
+      quote: lifecycle.quote,
+      at: checkedAt,
     });
   }
   let signature: TxSignature;

@@ -220,6 +220,149 @@ describe('create-market pipeline', () => {
     }
   });
 
+  /**
+   * The live failure this guards against. Panta's build carries a ~60s blockhash
+   * window (`blockhashExpiryHintSec: 60`, verified against mainnet:
+   * `isBlockhashValid` true with `lastValidBlockHeight` ~141 blocks ahead).
+   * "Prepare" and "submit" are two deliberate taps, so reading the fee can easily
+   * outlive the window. Before this guard the wallet was prompted anyway, sent
+   * the bytes, and the user's RPC answered `-32002 Blockhash not found` — with no
+   * way to tell whether the fee had moved.
+   */
+  it('refuses to prompt the wallet with a stale build, and never calls the adapter', async () => {
+    let clock: number = fixtureCreateAdapters.now();
+    let broadcastCalls = 0;
+    const windowedAdapters: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      // Panta's real window, not the fixture's generous 144 minutes.
+      buildCreate: async (quote) => ({
+        ...(await fixtureCreateAdapters.buildCreate(quote)),
+        buildExpiresAt: unixSeconds(clock + 60),
+      }),
+      broadcastCreate: async (build) => {
+        broadcastCalls += 1;
+        return fixtureCreateAdapters.broadcastCreate(build);
+      },
+      now: () => unixSeconds(clock),
+    };
+
+    let lc = expectOk(await draftFromClaim(CLAIM, windowedAdapters));
+    lc = expectOk(await validateDraftStep(lc, windowedAdapters));
+    lc = expectOk(await checkResolvabilityStep(lc));
+    lc = expectOk(await openQuoteStep(lc, windowedAdapters, ''));
+    lc = expectOk(await buildStep(lc, windowedAdapters));
+    expect(lc.status).toBe('built');
+    if (lc.status !== 'built') throw new Error('expected built');
+    const approvedQuote = lc.quote;
+
+    // The user reads the $50 fee for a minute and a half.
+    clock += 95;
+
+    const result = expectOk(await broadcastStep(lc, windowedAdapters));
+    expect(result.status).toBe('build_expired');
+    // THE invariant: the wallet was never asked, so no bytes reached the network.
+    expect(broadcastCalls).toBe(0);
+    // The quote outlives a dead payload — that is what makes a FREE rebuild
+    // possible, and therefore what keeps the already-approved fee valid.
+    if (result.status === 'build_expired') {
+      expect(result.quote.createId).toBe(approvedQuote.createId);
+      expect(result.quote.paymentUsdc).toBe(approvedQuote.paymentUsdc);
+      expect(result.quote.expiresAt).toBeGreaterThan(clock);
+    }
+  });
+
+  it('recovers from a stale build by replacing the payload from the SAME quote', async () => {
+    let clock: number = fixtureCreateAdapters.now();
+    let builds = 0;
+    const adapters: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      buildCreate: async (quote) => {
+        builds += 1;
+        return {
+          ...(await fixtureCreateAdapters.buildCreate(quote)),
+          // Panta's ~60s window, measured from the clock at BUILD time — so the
+          // first build is fresh when made and dead by the time the user
+          // submits, which is exactly the live failure.
+          buildExpiresAt: unixSeconds(clock + 60),
+        };
+      },
+      now: () => unixSeconds(clock),
+    };
+
+    let lc = expectOk(await draftFromClaim(CLAIM, adapters));
+    lc = expectOk(await validateDraftStep(lc, adapters));
+    lc = expectOk(await checkResolvabilityStep(lc));
+    lc = expectOk(await openQuoteStep(lc, adapters, ''));
+    lc = expectOk(await buildStep(lc, adapters));
+    expect(lc.status).toBe('built');
+
+    // The user lingers on the fee past the window before submitting.
+    clock += 95;
+
+    const expired = expectOk(await broadcastStep(lc, adapters));
+    expect(expired.status).toBe('build_expired');
+
+    // A stale payload may only be replaced, never broadcast — so the rebuild is
+    // the legal next step, and the refresh edge is what carries it.
+    const rebuilt = expectOk(await buildStep(expired, adapters));
+    expect(rebuilt.status).toBe('built');
+    if (rebuilt.status === 'built' && expired.status === 'build_expired') {
+      // Same quote => same fee authority => the user's approval still covers it.
+      expect(rebuilt.quote.createId).toBe(expired.quote.createId);
+      expect(rebuilt.quote.paymentUsdc).toBe(expired.quote.paymentUsdc);
+    }
+
+    const sent = expectOk(await broadcastStep(rebuilt, adapters));
+    expect(sent.status).toBe('broadcast');
+    expect(builds).toBe(2);
+  });
+
+  it('applies the same freshness guard to the sign-only path', async () => {
+    let clock: number = fixtureCreateAdapters.now();
+    let signCalls = 0;
+    const adapters: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      buildCreate: async (quote) => ({
+        ...(await fixtureCreateAdapters.buildCreate(quote)),
+        buildExpiresAt: unixSeconds(clock + 60),
+      }),
+      signCreate: async (build) => {
+        signCalls += 1;
+        return fixtureCreateAdapters.signCreate(build);
+      },
+      now: () => unixSeconds(clock),
+    };
+
+    let lc = expectOk(await draftFromClaim(CLAIM, adapters));
+    lc = expectOk(await validateDraftStep(lc, adapters));
+    lc = expectOk(await checkResolvabilityStep(lc));
+    lc = expectOk(await openQuoteStep(lc, adapters, ''));
+    lc = expectOk(await buildStep(lc, adapters));
+
+    clock += 95;
+
+    // A signature over a transaction that can never land is a pointless prompt,
+    // so the sign path refuses for exactly the same reason the send path does.
+    const result = expectOk(await signStep(lc, adapters));
+    expect(result.status).toBe('build_expired');
+    expect(signCalls).toBe(0);
+  });
+
+  it('keeps the refresh edge narrow: nothing re-enters an already-sent transaction', () => {    // The two edges the recovery needs, and only those.
+    expect(canCreateTransition('built', 'build_expired')).toBe(true);
+    expect(canCreateTransition('build_expired', 'built')).toBe(true);
+    // A stale payload cannot go straight to the network — it must be replaced.
+    expect(canCreateTransition('build_expired', 'broadcast')).toBe(false);
+    expect(canCreateTransition('build_expired', 'signed')).toBe(false);
+    // The refresh edge is open ONLY before anything was submitted: once the
+    // bytes are on-chain, there is no way back to a buildable state (Phase 3:
+    // double spend by re-sign).
+    expect(canCreateTransition('broadcast', 'built')).toBe(false);
+    expect(canCreateTransition('broadcast', 'build_expired')).toBe(false);
+    expect(canCreateTransition('registered', 'built')).toBe(false);
+    expect(canCreateTransition('registered', 'build_expired')).toBe(false);
+  });
+
   it('editDraft restarts at drafted with the user edits, preserving the injection scan', async () => {
     const drafted = expectOk(await draftFromClaim(CLAIM, fixtureCreateAdapters));
     if (drafted.status !== 'drafted') throw new Error('expected drafted');
