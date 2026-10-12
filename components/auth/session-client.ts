@@ -12,26 +12,61 @@
 'use client';
 
 import { getIdentityToken } from '@privy-io/react-auth';
+import type { SessionMintFailureKind } from '@/lib/auth/session-mint';
 
-export type SessionMintStatus =
-  | 'ok'
-  | 'no-wallet' // 403: authenticated but no linked Solana wallet
-  | 'unavailable' // 503: identity provider down
-  | 'unauthorized' // 400/401 or no token available
-  | 'network'; // fetch failed (offline / proxy)
+export type SessionMintStatus = 'ok' | SessionMintFailureKind;
 
 export interface SessionMintResult {
   readonly status: SessionMintStatus;
 }
 
-/** Mint (or refresh) the signed server session for the current Privy user. */
-export async function mintSession(): Promise<SessionMintResult> {
+/**
+ * Backoff between mint attempts (ms).
+ *
+ * Why the retry exists: the Privy identity token is not reliably readable the
+ * instant a SIWS login settles — `getIdentityToken()` can return null for a
+ * moment after `loginWithSiws` resolves. A single-shot mint lost that race, and
+ * because the caller recorded the attempt as done before it resolved, the user
+ * was left with a connected-looking wallet and NO server session for the rest of
+ * the page's life (every guarded route then 401s). Bounded: at most 3 attempts,
+ * ~1s worst case.
+ */
+const MINT_BACKOFF_MS = [250, 750] as const;
+
+/**
+ * Last-resort identity token, mirrored out of the Privy SDK's own store by a
+ * component that already subscribes to it (`useIdentityToken`).
+ *
+ * Why this exists: the bare `getIdentityToken()` reaches into a module-level
+ * Privy client and `await`s a NETWORK refresh (`updateUserAndIdToken`) before it
+ * reads the stored token — so it throws (or returns null) purely because that
+ * refresh failed, discarding a perfectly usable token from the same store.
+ * `mintSession` swallowing that throw is what left a connected wallet with no
+ * server session. This is a read-only fallback for exactly that case.
+ *
+ * Not a new exposure: the value is already resident in the browser (the SDK
+ * stores it) and it is never persisted, logged, or sent anywhere but the
+ * session route. Held in memory for the life of the page.
+ */
+let mirroredIdentityToken: string | null = null;
+
+/** Mirror the SDK's cached identity token for use as a last-resort fallback. */
+export function mirrorIdentityToken(token: string | null | undefined): void {
+  mirroredIdentityToken =
+    typeof token === 'string' && token.length > 0 ? token : null;
+}
+
+/** One mint attempt. Never throws. */
+async function attemptMint(): Promise<SessionMintResult> {
   let token: string | null = null;
   try {
     token = await getIdentityToken();
   } catch {
-    return { status: 'unauthorized' };
+    token = null;
   }
+  // Fall back to the mirrored store value when the refresh path gave us nothing:
+  // a failed refresh must not cost a user who is demonstrably signed in.
+  if (!token) token = mirroredIdentityToken;
   if (!token) return { status: 'unauthorized' };
 
   let res: Response;
@@ -51,6 +86,24 @@ export async function mintSession(): Promise<SessionMintResult> {
   if (res.status === 403) return { status: 'no-wallet' };
   if (res.status === 503) return { status: 'unavailable' };
   return { status: 'unauthorized' };
+}
+
+/**
+ * Mint (or refresh) the signed server session for the current Privy user.
+ *
+ * Retries ONLY on `unauthorized` (a missing/not-yet-readable token). A 403
+ * (no linked wallet), a 503 (provider down) or a network failure will not change
+ * in 250ms, so those return immediately and the caller can report them.
+ */
+export async function mintSession(): Promise<SessionMintResult> {
+  let result = await attemptMint();
+  if (result.status !== 'unauthorized') return result;
+  for (const wait of MINT_BACKOFF_MS) {
+    await new Promise((resolve) => setTimeout(resolve, wait));
+    result = await attemptMint();
+    if (result.status !== 'unauthorized') return result;
+  }
+  return result;
 }
 
 /** Best-effort server session clear; failures are ignored (cookie TTLs out). */

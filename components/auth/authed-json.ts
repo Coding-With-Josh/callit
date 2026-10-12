@@ -11,17 +11,29 @@
  * a route that always 401s can never become a loop. Nothing here grants
  * privilege — the cookie it relies on is re-verified server-side at every use.
  *
- * Phase 2 (no internals leak): a failure result carries only a status. The
- * response body is never read on a non-2xx response, so no upstream message can
- * reach a caller through this path.
+ * Phase 2 (no internals leak): a failure result carries a status and, when the
+ * mint itself failed, WHICH kind of mint failure it was — a closed enum of
+ * fixed strings, never body text. The response body is never read on a non-2xx
+ * response, so no upstream message can reach a caller through this path.
  */
 'use client';
 
 import { mintSession } from './session-client';
+import type { SessionMintFailureKind } from '@/lib/auth/session-mint';
 
 export type AuthedJsonResult =
   | { readonly ok: true; readonly data: unknown }
-  | { readonly ok: false; readonly status: number };
+  | {
+      readonly ok: false;
+      readonly status: number;
+      /**
+       * Present ONLY when the request 401'd and the session mint that was
+       * supposed to fix it also failed. A bare 401 is indistinguishable from
+       * "you are signed out", which is a lie when the wallet pill is showing a
+       * connected wallet — this field is how a caller tells those apart.
+       */
+      readonly sessionMintFailed?: SessionMintFailureKind;
+    };
 
 async function requestJson(
   path: string,
@@ -60,6 +72,11 @@ export async function authedJson(
   const first = await requestJson(path, method, init.body);
   if (first.ok || first.status !== 401) return first;
   const minted = await mintSession();
-  if (minted.status !== 'ok') return first;
+  if (minted.status !== 'ok') {
+    // The retry cannot help if there is no session to retry with. Report the
+    // mint's own failure so the caller can say what actually went wrong instead
+    // of "signed out" — the Phase 3 failure this field exists to close.
+    return { ok: false, status: first.status, sessionMintFailed: minted.status };
+  }
   return requestJson(path, method, init.body);
 }

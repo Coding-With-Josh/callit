@@ -24,6 +24,7 @@
 import { useMemo } from 'react';
 import { useSolanaSigner } from '@/components/auth/use-solana-signer';
 import { authedJson } from '@/components/auth/authed-json';
+import { describeSessionMintFailure } from '@/lib/auth/session-mint';
 import {
   describeCreateClientError,
   describeSourceCheckError,
@@ -152,6 +153,13 @@ export function useCreateAdapters(): CreateAdapters {
         });
         // The failure body is never read (Phase 2) — only the status number.
         if (!res.ok) {
+          // A 401 whose session mint ALSO failed is not "you are signed out":
+          // the mint's own reason is the true one, and it is actionable. This
+          // is the case that showed "Connect your wallet to check sources"
+          // while the wallet pill was displaying a connected wallet.
+          if (res.sessionMintFailed) {
+            return { ok: false, reason: describeSessionMintFailure(res.sessionMintFailed) };
+          }
           return { ok: false, reason: describeSourceCheckError(res.status) };
         }
         return parseSourceVerdict(res.data);
