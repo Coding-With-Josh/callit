@@ -28,7 +28,7 @@
 import { useCallback, useState } from 'react';
 import { useSolanaSigner } from '@/components/auth/use-solana-signer';
 import type { SignRequestError } from '@/components/auth/use-solana-signer';
-import { mintSession } from '@/components/auth/session-client';
+import { authedJson } from '@/components/auth/authed-json';
 import {
   marketIdSchema,
   unixSeconds,
@@ -55,37 +55,6 @@ interface PreparedRequest {
   readonly marketId: MarketId;
   readonly side: Side;
   readonly amountUsdc: UsdcDecimal;
-}
-
-type JsonResult = { readonly ok: true; readonly data: unknown } | { readonly ok: false; readonly status: number };
-
-async function postJson(path: string, body: unknown): Promise<JsonResult> {
-  try {
-    const response = await fetch(path, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      credentials: 'same-origin',
-      cache: 'no-store',
-    });
-    if (!response.ok) return { ok: false, status: response.status };
-    return { ok: true, data: await response.json() };
-  } catch {
-    // Network/proxy failure. Never surface the underlying error.
-    return { ok: false, status: 0 };
-  }
-}
-
-/**
- * POST, and on a 401 mint a fresh server session and retry exactly once. The
- * retry is bounded so a route that always 401s cannot loop.
- */
-async function authedPost(path: string, body: unknown): Promise<JsonResult> {
-  const first = await postJson(path, body);
-  if (first.ok || first.status !== 401) return first;
-  const minted = await mintSession();
-  if (minted.status !== 'ok') return first;
-  return postJson(path, body);
 }
 
 /** Fixed user copy keyed by the route's HTTP status. Never the response body. */
@@ -164,10 +133,13 @@ export function useBuyOrder(): BuyOrderController {
       };
 
       setStatus('quoting');
-      const quoteRes = await authedPost('/api/panta/buy/quote', {
-        marketId: request.marketId,
-        side: request.side,
-        amountUsdc: request.amountUsdc,
+      const quoteRes = await authedJson('/api/panta/buy/quote', {
+        method: 'POST',
+        body: {
+          marketId: request.marketId,
+          side: request.side,
+          amountUsdc: request.amountUsdc,
+        },
       });
       if (!quoteRes.ok) {
         setStatus('idle');
@@ -183,8 +155,9 @@ export function useBuyOrder(): BuyOrderController {
       setQuote(parsedQuote.value);
 
       setStatus('building');
-      const buildRes = await authedPost('/api/panta/buy/build', {
-        quoteId: parsedQuote.value.quoteId,
+      const buildRes = await authedJson('/api/panta/buy/build', {
+        method: 'POST',
+        body: { quoteId: parsedQuote.value.quoteId },
       });
       if (!buildRes.ok) {
         setStatus('idle');

@@ -1,0 +1,110 @@
+/**
+ * create/client — the client-side schema boundary for the create proxy routes.
+ *
+ * Owns: turning the JSON our own routes return into the domain `CreateQuote` /
+ * `CreateBuild` / source verdict, and the fixed user copy for a failed create
+ * request. Every parse is strict — an unexpected shape is a refusal, never a
+ * partially-trusted object handed to the signer.
+ * Must not import: React, Next, or any server module.
+ *
+ * Phase 1 (complete mediation): nothing in here grants authority. The parsed
+ * values are operands for the pipeline (which re-checks stages) and for the
+ * signer gate (which re-checks the sole signer), not permissions.
+ *
+ * Phase 2 (no internals leak): a route's response body is only ever parsed, and
+ * every message this module produces is fixed copy. An upstream string cannot
+ * travel through here into the UI.
+ */
+import { z } from 'zod';
+import {
+  createIdSchema,
+  eventPdaSchema,
+  unixSecondsSchema,
+  unsignedTransactionB64Schema,
+  usdcDecimalSchema,
+  type CreateBuild,
+  type CreateQuote,
+} from '@/types';
+import type { SourceVerification } from '@/lib/create-market';
+
+/**
+ * The domain quote as it crosses our own JSON route. Branded schemas validate
+ * each field on the way in, so a route that echoed a malformed create id or a
+ * negative expiry would fail here rather than reach the signer.
+ */
+const createQuoteResponseSchema = z.object({
+  createId: createIdSchema,
+  expectedEventPda: eventPdaSchema,
+  paymentUsdc: usdcDecimalSchema,
+  liquidityInjectionUsdc: usdcDecimalSchema,
+  platformRevenueUsdc: usdcDecimalSchema,
+  expiresAt: unixSecondsSchema,
+});
+
+/**
+ * The domain build as it crosses our own JSON route. `transaction` is the only
+ * thing that will be signed, and the blockhash window is what the pipeline
+ * re-checks before prompting the wallet.
+ */
+const createBuildResponseSchema = z.object({
+  transaction: unsignedTransactionB64Schema,
+  recentBlockhash: z.string().min(1),
+  lastValidBlockHeight: z.number().int().nonnegative(),
+  buildExpiresAt: unixSecondsSchema,
+});
+
+/** The verdict shape the source-verify route returns. */
+const sourceVerdictResponseSchema = z.object({
+  ok: z.boolean(),
+  reason: z.string().optional(),
+});
+
+/**
+ * A malformed create payload. Carries fixed copy only — the zod issue tree can
+ * quote the rejected input, so it is never surfaced (Phase 2).
+ */
+export class CreateClientError extends Error {
+  constructor(message = 'The create response could not be read.') {
+    super(message);
+    this.name = 'CreateClientError';
+  }
+}
+
+export function parseCreateQuote(data: unknown): CreateQuote {
+  const parsed = createQuoteResponseSchema.safeParse(data);
+  if (!parsed.success) throw new CreateClientError();
+  return parsed.data;
+}
+
+export function parseCreateBuild(data: unknown): CreateBuild {
+  const parsed = createBuildResponseSchema.safeParse(data);
+  if (!parsed.success) throw new CreateClientError();
+  return parsed.data;
+}
+
+/**
+ * Phase 2 (fail closed): an unreadable verdict is a FAILED check, never a pass —
+ * the same direction the server-side verifier fails in.
+ */
+export function parseSourceVerdict(data: unknown): SourceVerification {
+  const parsed = sourceVerdictResponseSchema.safeParse(data);
+  if (!parsed.success) {
+    return { ok: false, reason: 'The source check returned an unreadable result.' };
+  }
+  return parsed.data.ok
+    ? { ok: true }
+    : { ok: false, reason: parsed.data.reason ?? 'The source could not be reached.' };
+}
+
+/** Fixed user copy keyed by the route's HTTP status. Never the response body. */
+export function describeCreateClientError(status: number): string {
+  if (status === 401 || status === 403) return 'Sign in to continue.';
+  if (status === 400) return "That draft isn't valid for a market. Check the fields and try again.";
+  if (status === 404) return 'That create session is no longer available.';
+  if (status === 409) return 'Panta refused this market. Change the claim or the schedule and try again.';
+  if (status === 422) return "Panta can't quote this market as written. Adjust the resolution rule or the sources.";
+  if (status === 429) return 'Too many requests — wait a moment and try again.';
+  if (status === 503) return 'Market creation is temporarily unavailable.';
+  if (status === 504) return "Panta didn't respond in time.";
+  return 'The create request could not be completed.';
+}

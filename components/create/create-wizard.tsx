@@ -1,22 +1,23 @@
 /* eslint-disable react-hooks/preserve-manual-memoization */
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link2, Loader2, Pencil, Plus, X } from "lucide-react";
 import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import { useSolanaSigner } from "@/components/auth/use-solana-signer";
+import { useCreateAdapters } from "./use-create-adapters";
 import {
+  buildStep,
   checkResolvabilityStep,
   checkSource,
   draftFromClaim,
   editDraft,
   effectiveStartSeconds,
-  fixtureCreateAdapters,
   openQuoteStep,
   requireVerifiedSource,
+  signStep,
   uploadCoverStep,
   validateDraftStep,
-  type CreateAdapters,
   type CreateMarketError,
   type SourceCheck,
 } from "@/lib/create-market";
@@ -34,8 +35,6 @@ import {
 } from "@/types";
 import { formatAsOf, formatSignatureShort, formatUnixDate, formatUsdc } from "@/lib/format";
 import { loadCoverFontCss, templatedCoverDataUri } from "@/lib/create-image";
-import { buildPreviewSelfTransferB64 } from "@/lib/solana/preview-transaction";
-import { describeSignRequestError } from "@/lib/solana/sign-messages";
 import { PantaBadge } from "@/components/market/panta-badge";
 import {
   Select,
@@ -50,20 +49,17 @@ import {
  *
  * Phase 1 (complete mediation): the island never constructs a lifecycle object
  * itself. Every stage it renders comes back from lib/create-market, so the only
- * way to reach `validated` / `resolvable` / `quoted` is through the service's
- * validators and transition guards. A revision goes through `editDraft` (a
- * fresh `drafted`), never a hand-built draft.
+ * way to reach `validated` / `resolvable` / `quoted` / `built` / `signed` is
+ * through the service's validators and transition guards. A revision goes
+ * through `editDraft` (a fresh `drafted`), never a hand-built draft.
  *
- * Sign-step scope: the fixture walk builds no Panta transaction, so the sign
- * step signs a REAL but inert preview transaction (a 1-lamport self-transfer
- * from the user's own wallet — lib/solana/preview-transaction). This exercises
- * the real signer path end to end, but nothing is broadcast and no market is
- * registered: the market id never exists. A live create quote/build (Panta)
- * lands when the create pipeline is wired to the server — see the header of
- * lib/create-market.ts.
+ * Sign-step scope: the island drives the REAL create pipeline — the quote and
+ * build come from Panta through this app's own routes (app/api/panta/create/*,
+ * which re-authenticate the session and bind the wallet server-side), and the
+ * signature the user produces is over Panta's own create transaction. It is
+ * never broadcast and the market is never registered: `registerStep` has no
+ * route behind it, so a create stops at `signed` by construction.
  */
-
-const adapters: CreateAdapters = fixtureCreateAdapters;
 
 const STEPS = ["Claim", "Draft", "Resolve", "Quote", "Sign"] as const;
 
@@ -99,36 +95,47 @@ const checksRecord = (
   Object.fromEntries(checks.map((check) => [check.url, check]));
 
 /**
- * The sign step (Phase 1: complete mediation).
+ * Step 05 — the real signing step (Phase 1: complete mediation).
  *
  * Connecting a wallet here is an *affordance* only: it grants no server
- * privilege, and this island is never the authority. The server routes that
- * will quote/build/register re-check auth independently and fail closed.
+ * privilege, and this island is never the authority. The routes that quote and
+ * build re-authenticate the session and re-derive the wallet themselves, and the
+ * signer gate (lib/solana/sign via use-solana-signer) re-checks that the
+ * transaction's ONLY required signer is the session identity wallet before the
+ * wallet is prompted.
  *
- * This signs a REAL transaction with the user's wallet — a 1-lamport
- * self-transfer built by lib/solana/preview-transaction, whose only required
- * signer is the session identity wallet. It exercises the exact signer gate the
- * buy flow uses (lib/solana/sign via use-solana-signer). It is deliberately
- * unbroadcastable (placeholder blockhash) and moves nothing; no market is
- * registered. When the live create pipeline lands, this button signs Panta's
- * build output instead, through the same gate.
+ * Phase 3 (stale build): "prepare" and "sign" are two deliberate actions. The
+ * build's blockhash window is re-checked by the pipeline's `buildStep` before the
+ * wallet is ever prompted, so a user who lingered on the review step cannot sign
+ * an expired transaction.
+ *
+ * The transaction signed here is Panta's own create transaction. It is NOT
+ * broadcast and the market is NOT registered — nothing is submitted.
  */
-const SignStepButton = () => {
+const SignStep = ({
+  phase,
+  busy,
+  signature,
+  onBuild,
+  onSign,
+}: {
+  phase: "quoted" | "built" | "signed";
+  busy: boolean;
+  signature: string | null;
+  onBuild: () => void;
+  onSign: () => void;
+}) => {
   const { ready, authenticated, unavailable, login } = usePrivyGate();
-  const { wallet, sign, ready: signerReady } = useSolanaSigner();
-  const [busy, setBusy] = useState(false);
-  const [signature, setSignature] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { ready: signerReady } = useSolanaSigner();
 
   if (!authenticated) {
-    const blocked = unavailable;
     return (
       <button
         type="button"
-        disabled={!ready || blocked}
-        aria-busy={!ready && !blocked}
+        disabled={!ready || unavailable}
+        aria-busy={!ready && !unavailable}
         title={
-          blocked
+          unavailable
             ? "Wallet login is unavailable — this origin must be allowlisted in the Privy dashboard"
             : undefined
         }
@@ -137,76 +144,67 @@ const SignStepButton = () => {
         }}
         className="w-full rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
       >
-        {blocked ? "Login unavailable" : "Connect to sign"}
+        {unavailable ? "Login unavailable" : "Connect to sign"}
       </button>
     );
   }
 
-  const signed = signature !== null;
+  if (phase === "signed") {
+    return (
+      <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
+        Signed {signature ? formatSignatureShort(signature) : ""} — nothing
+        submitted or registered.
+      </p>
+    );
+  }
 
-  const onSign = async () => {
-    setError(null);
-    if (!wallet) {
-      setError("Reconnect your wallet to sign.");
-      return;
-    }
-    let b64: string;
-    try {
-      b64 = buildPreviewSelfTransferB64(wallet);
-    } catch {
-      // A malformed identity wallet should be impossible here (the signer gate
-      // validated it) — fail closed rather than prompting with bad bytes.
-      setError("Could not prepare the transaction.");
-      return;
-    }
-    setBusy(true);
-    try {
-      const out = await sign(b64);
-      if (out.ok) setSignature(out.value.signature);
-      else setError(describeSignRequestError(out.error));
-    } finally {
-      setBusy(false);
-    }
-  };
+  if (phase === "quoted") {
+    return (
+      <div className="flex flex-col gap-3">
+        <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
+          Panta reserved the fee above for this wallet. Preparing asks Panta to
+          assemble the exact market-creation transaction — nothing is signed yet.
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          aria-busy={busy}
+          onClick={onBuild}
+          className="flex w-full items-center justify-center gap-2 rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+        >
+          {busy && <Loader2 className="size-4 animate-spin" />}
+          {busy ? "Preparing…" : "Prepare transaction"}
+        </button>
+      </div>
+    );
+  }
 
-  const disabled = busy || signed || !signerReady;
+  const disabled = busy || !signerReady;
 
   return (
     <div className="flex flex-col gap-3">
+      <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
+        Your wallet signs Panta&apos;s create transaction. It is never broadcast
+        and the market is not registered — nothing is submitted.
+      </p>
       <button
         type="button"
         disabled={disabled}
         aria-busy={busy}
-        onClick={() => void onSign()}
+        onClick={onSign}
         className={`flex w-full items-center justify-center gap-2 rounded-full py-3 text-sm font-semibold tracking-tight transition-transform duration-150 motion-reduce:transition-none ${
-          busy || !signerReady || signed
+          disabled
             ? "cursor-not-allowed bg-[#2D1C00]/15 text-[#2D1C00]/50"
             : "bg-[#2D1C00] text-[#FFF2DD] hover:scale-[1.02] active:scale-[0.98]"
         }`}
       >
         {busy && <Loader2 className="size-4 animate-spin" />}
-        {signed ? "Signed ✓" : busy ? "Confirm in your wallet…" : "Sign with wallet"}
+        {busy ? "Confirm in your wallet…" : "Sign with wallet"}
       </button>
 
-      {!signerReady && !signed && (
+      {!signerReady && (
         <p className="text-xs leading-relaxed tracking-tight text-[#2D1C00]/55">
           Reconnect your wallet to sign.
-        </p>
-      )}
-
-      {error && (
-        <p
-          role="alert"
-          className="rounded-xl bg-red-50 px-3 py-2 text-xs font-medium leading-relaxed text-red-800 ring-1 ring-red-200"
-        >
-          {error}
-        </p>
-      )}
-
-      {signed && signature && (
-        <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
-          Signed {formatSignatureShort(signature)} — nothing submitted or
-          registered.
         </p>
       )}
     </div>
@@ -275,6 +273,8 @@ const CoverPreview = ({ question }: { question: string }) => {
 };
 
 export const CreateWizard = () => {
+  // The live adapter set: our own proxy routes + the session wallet's signer.
+  const adapters = useCreateAdapters();
   const [claim, setClaim] = useState("");
   const [raw, setRaw] = useState<RawDraft | null>(null);
   const [lifecycle, setLifecycle] = useState<CreateLifecycle | null>(null);
@@ -301,9 +301,21 @@ export const CreateWizard = () => {
       ? 0
       : MIN_STANDARD_LEAD_SECONDS;
 
+  /**
+   * The categories read is a PAID, shared-budget Panta read, so it must run
+   * exactly once per mount. `adapters` changes identity when the wallet connects
+   * (its signer is re-bound), so it is read through a ref rather than listed as
+   * a dependency — otherwise connecting would spend a second upstream read. The
+   * ref is synced in an effect (never during render).
+   */
+  const adaptersRef = useRef(adapters);
+  useEffect(() => {
+    adaptersRef.current = adapters;
+  }, [adapters]);
+
   useEffect(() => {
     let active = true;
-    void adapters
+    void adaptersRef.current
       .fetchCategories()
       .then((list) => {
         if (active) setCategories(list);
@@ -481,6 +493,40 @@ export const CreateWizard = () => {
     setStartDateError(null);
   };
 
+  /**
+   * quoted -> built. A separate action from signing on purpose: the fee is on
+   * screen (section 04) before this runs, and the pipeline re-checks Panta's
+   * blockhash window here (Phase 3: no expired build reaches the wallet).
+   */
+  const onBuildTransaction = () =>
+    run(async () => {
+      if (!lifecycle || lifecycle.status !== "quoted") return;
+      setError(null);
+      const built = await buildStep(lifecycle, adapters);
+      if (!built.ok) {
+        setError(built.error);
+        return;
+      }
+      setLifecycle(built.value);
+    });
+
+  /**
+   * built -> signed. The only path to a wallet prompt: the pipeline's signStep
+   * checks the stage transition, and the adapter's signCreate runs the
+   * single-signer gate before the wallet sees any bytes.
+   */
+  const onSignTransaction = () =>
+    run(async () => {
+      if (!lifecycle || lifecycle.status !== "built") return;
+      setError(null);
+      const signed = await signStep(lifecycle, adapters);
+      if (!signed.ok) {
+        setError(signed.error);
+        return;
+      }
+      setLifecycle(signed.value);
+    });
+
   const onStartOver = () => {
     setClaim("");
     setRaw(null);
@@ -500,6 +546,12 @@ export const CreateWizard = () => {
     status === "create_expired";
   const resolveActive = status === "resolvable";
   const quoteReached = status === "quoted" || status === "create_expired";
+
+  // Narrowed phase for the sign step. Null means the flow has not reached §05.
+  const signPhase: "quoted" | "built" | "signed" | null =
+    status === "quoted" || status === "built" || status === "signed"
+      ? status
+      : null;
 
   const categoryOptions = useMemo(() => {
     const set = new Set(categories);
@@ -618,6 +670,16 @@ export const CreateWizard = () => {
                   Cover preview · generated from the question
                 </figcaption>
               </figure>
+              {/* Honest disclosure: this card is rendered LOCALLY and never
+                  leaves the browser. Panta's quote requires a public http(s)
+                  imageUrl, and no image host is wired yet, so the wire receives
+                  a documented placeholder. Never present a placeholder as the
+                  market's real artwork. */}
+              <p className="text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/45">
+                Image hosting isn&apos;t wired up yet, so Panta&apos;s quote
+                receives a public placeholder image URL. The card above is
+                rendered on this page only.
+              </p>
 
               {/* Live preview of the market's shape. Same read source and same
                   component as the collapsed review (DraftSpec), so the preview
@@ -962,15 +1024,18 @@ export const CreateWizard = () => {
         )}
 
         {/* 05 — Sign (gated; hard stop on signing) */}
-        {status === "quoted" && (
+        {signPhase && (
           <Section index={5} title="Sign" state="active">
-            <SignStepButton />
-            <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
-              Signing proves your wallet is wired up end to end: your wallet
-              signs a real transaction, but it is a no-op self-transfer that is
-              never broadcast, and no market is registered. Live market creation
-              signs Panta&apos;s own transaction here.
-            </p>
+            <SignStep
+              phase={signPhase}
+              busy={busy}
+              signature={
+                lifecycle?.status === "signed" ? lifecycle.signature : null
+              }
+              onBuild={onBuildTransaction}
+              onSign={onSignTransaction}
+            />
+            {signPhase !== "signed" && <ErrorPanel error={error} />}
           </Section>
         )}
 

@@ -7,10 +7,11 @@
  * request.
  * Must not import: React, Next, or any UI module.
  *
- * NOT exposed to the browser. Only read routes exist under app/api/panta; these
- * write adapters are constructed server-side (after the identity layer can
- * authenticate a caller) and are exercised by tests. This module is the seam the
- * wizard will use once Privy lands — it does not itself open any route.
+ * NOT exposed to the browser. The write paths are reachable only through the
+ * server routes under app/api/panta/create, which bind `wallet` from the
+ * authenticated session before calling the standalone functions below. The
+ * `CreateAdapters` factory at the bottom of this file is the same surface wired
+ * for tests (and for the client-side adapter module that calls those routes).
  *
  * Phase 3 (wallet substitution): `wallet` is bound when the adapter is
  * constructed and is never read from a draft, route param, or client payload.
@@ -128,6 +129,106 @@ export async function requestImageUploadSignature(
   });
 }
 
+/** The draft fields a create quote needs, already validated at the perimeter. */
+export interface CreateQuoteDraftInput {
+  readonly question: string;
+  readonly resolutionRule: string;
+  readonly sourcesOfTruth: readonly string[];
+  readonly category: string;
+  readonly startTime: number;
+  readonly endTime: number;
+  readonly resolutionTime: number;
+  readonly marketType?: 'standard' | 'breaking';
+  readonly eventInProgress?: boolean;
+  readonly title?: string;
+  readonly description?: string;
+  readonly region?: string;
+}
+
+/**
+ * Open a create quote for `wallet`.
+ *
+ * Phase 3 (wallet substitution): `wallet` is a REQUIRED POSITIONAL ARGUMENT,
+ * never a field read out of `draft`. The route that calls this binds it from the
+ * authenticated session, so no request body can redirect the fee payer or open a
+ * create session against somebody else's wallet. The outgoing body is still
+ * allow-listed field by field and then re-parsed by `createQuoteRequestSchema`,
+ * so anything a hostile caller smuggled into the draft cannot reach the wire.
+ *
+ * Money rule: the returned `paymentUsdc` is the ONLY fee authority.
+ */
+export async function requestCreateQuote(
+  client: PantaClient,
+  wallet: string,
+  draft: CreateQuoteDraftInput,
+  imageUrl: string,
+): Promise<CreateQuote> {
+  // Allow-list the outgoing body: only these fields reach the wire.
+  const body = createQuoteRequestSchema.parse({
+    wallet,
+    question: draft.question,
+    resolutionRule: draft.resolutionRule,
+    sourcesOfTruth: draft.sourcesOfTruth,
+    category: draft.category,
+    startTime: draft.startTime,
+    endTime: draft.endTime,
+    resolutionTime: draft.resolutionTime,
+    imageUrl,
+    marketType: draft.marketType,
+    eventInProgress: draft.eventInProgress,
+    title: draft.title,
+    description: draft.description,
+    region: draft.region,
+  });
+  const result = await client.request({
+    method: 'POST',
+    path: '/markets/create/quote/',
+    body,
+    schema: createQuoteResponseSchema,
+  });
+  if (!result.ok) throw new PantaCallError(result.error);
+  return mapOrThrow(() => toDomainQuote(result.value));
+}
+
+/**
+ * Build the unsigned create transaction for a reserved `createId`.
+ *
+ * Phase 3 (cross-account build): the session wallet is always sent alongside the
+ * id, so a `createId` belonging to another wallet cannot be built against this
+ * one — Panta refuses the mismatch. The build costs nothing and moves nothing.
+ *
+ * Phase 2 (fail closed): an empty `transaction` (the sandbox shape) is refused
+ * here, so a signable-looking but empty payload can never reach a wallet.
+ */
+export async function buildCreateTransaction(
+  client: PantaClient,
+  wallet: string,
+  createId: string,
+): Promise<CreateBuild> {
+  const body = createBuildRequestSchema.parse({ createId, wallet });
+  const result = await client.request({
+    method: 'POST',
+    path: '/markets/create/build/',
+    body,
+    schema: createBuildResponseSchema,
+  });
+  if (!result.ok) throw new PantaCallError(result.error);
+  if (result.value.transaction.trim().length === 0) {
+    // Phase 2 (fail closed): an empty transaction is not signable, so it must
+    // never reach a wallet. (The pk_test sandbox returns "" here.)
+    throw new PantaCallError({
+      kind: 'malformed',
+      message: 'Panta returned no create transaction to sign',
+    });
+  }
+  return mapOrThrow(() => ({
+    transaction: unsignedTransactionB64Schema.parse(result.value.transaction),
+    recentBlockhash: result.value.recentBlockhash,
+    lastValidBlockHeight: result.value.lastValidBlockHeight,
+    buildExpiresAt: wireIsoToUnixSeconds(result.value.expiresAt),
+  }));
+}
+
 /** Build the real HTTP-backed create adapters. */
 export function createPantaCreateAdapters(
   config: PantaCreateAdapterConfig,
@@ -157,59 +258,11 @@ export function createPantaCreateAdapters(
       draft: ResolvableDraft,
       imageUrl: string,
     ): Promise<CreateQuote> {
-      // Allow-list the outgoing body: only these fields reach the wire.
-      const body = createQuoteRequestSchema.parse({
-        wallet: config.wallet,
-        question: draft.question,
-        resolutionRule: draft.resolutionRule,
-        sourcesOfTruth: draft.sourcesOfTruth,
-        category: draft.category,
-        startTime: draft.startTime,
-        endTime: draft.endTime,
-        resolutionTime: draft.resolutionTime,
-        imageUrl,
-        marketType: draft.marketType,
-        eventInProgress: draft.eventInProgress,
-        title: draft.title,
-        description: draft.description,
-        region: draft.region,
-      });
-      const result = await config.client.request({
-        method: 'POST',
-        path: '/markets/create/quote/',
-        body,
-        schema: createQuoteResponseSchema,
-      });
-      if (!result.ok) throw new PantaCallError(result.error);
-      return mapOrThrow(() => toDomainQuote(result.value));
+      return requestCreateQuote(config.client, config.wallet, draft, imageUrl);
     },
 
     async buildCreate(quote: CreateQuote): Promise<CreateBuild> {
-      const body = createBuildRequestSchema.parse({
-        createId: quote.createId,
-        wallet: config.wallet,
-      });
-      const result = await config.client.request({
-        method: 'POST',
-        path: '/markets/create/build/',
-        body,
-        schema: createBuildResponseSchema,
-      });
-      if (!result.ok) throw new PantaCallError(result.error);
-      if (result.value.transaction.trim().length === 0) {
-        // Phase 2 (fail closed): an empty transaction is not signable, so it
-        // must never reach a wallet. (The pk_test sandbox returns "" here.)
-        throw new PantaCallError({
-          kind: 'malformed',
-          message: 'Panta returned no create transaction to sign',
-        });
-      }
-      return mapOrThrow(() => ({
-        transaction: unsignedTransactionB64Schema.parse(result.value.transaction),
-        recentBlockhash: result.value.recentBlockhash,
-        lastValidBlockHeight: result.value.lastValidBlockHeight,
-        buildExpiresAt: wireIsoToUnixSeconds(result.value.expiresAt),
-      }));
+      return buildCreateTransaction(config.client, config.wallet, quote.createId);
     },
 
     async register(

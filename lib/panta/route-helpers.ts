@@ -17,7 +17,12 @@
  * own CORS headers and their own (database-backed) budget instead of a session.
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { pantaClientFromEnv, type PantaClient, type PantaTransportError } from './client';
+import {
+  pantaClientFromEnv,
+  PantaCallError,
+  type PantaClient,
+  type PantaTransportError,
+} from './client';
 import { requireAuthFromRequest, type AuthResult } from '@/lib/auth/require-auth';
 
 /** Every catalog read is live and must not be cached or replayed. */
@@ -106,4 +111,18 @@ export function transportErrorResponse(error: PantaTransportError): NextResponse
     { error: transportErrorMessage(error) },
     { status: transportErrorStatus(error), headers: NO_STORE },
   );
+}
+
+/**
+ * The upstream transport error behind a thrown `PantaCallError`, or `null` for
+ * ANY other throw (a zod failure, a bug, a mapping error).
+ *
+ * This exists so a route can map an upstream failure to its status without ever
+ * putting the caught error's own message into a response: `null` means "we do
+ * not know what this was", which must be answered with fixed copy, not with the
+ * error text. Never replace this with a cast-and-read — that is exactly how an
+ * internal message ends up in a response body.
+ */
+export function transportOf(error: unknown): PantaTransportError | null {
+  return error instanceof PantaCallError ? error.transport : null;
 }

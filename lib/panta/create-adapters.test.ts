@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { createPantaClient, PantaCallError } from './client';
-import { createPantaCreateAdapters } from './create-adapters';
+import {
+  buildCreateTransaction,
+  createPantaCreateAdapters,
+  requestCreateQuote,
+  type CreateQuoteDraftInput,
+} from './create-adapters';
 import { txSignature, unixSeconds, type ResolvableDraft } from '@/types';
 
 const EVENT_PDA = '11111111111111111111111111111111';
@@ -238,6 +243,91 @@ describe('create adapters', () => {
     });
     await expect(
       adapters(client).requestQuote(draft, 'https://cdn.example.com/cover.png'),
+    ).rejects.toBeInstanceOf(PantaCallError);
+  });
+});
+
+// The standalone functions are the exact seam the create ROUTES call, with the
+// wallet bound from the session. These pin the properties the routes rely on.
+
+describe('requestCreateQuote / buildCreateTransaction (route seam)', () => {
+  it('binds the wallet from the argument, never from the draft (Phase 3)', async () => {
+    const { client, calls } = routingClient({
+      '/markets/create/quote/': {
+        body: {
+          createId: 'cr_abc123',
+          expectedEventPda: EVENT_PDA,
+          paymentUsdc: '50000000',
+          liquidityInjectionUsdc: '10000000',
+          platformRevenueUsdc: '40000000',
+          expiresAt: '2026-09-04T16:30:00.000000Z',
+        },
+      },
+    });
+    // A hostile draft that tries to smuggle its own fee payer alongside the
+    // fields the schema accepts.
+    const hostile = {
+      ...draft,
+      wallet: 'Attacker1111111111111111111111111111111',
+    } as CreateQuoteDraftInput & { wallet: string };
+
+    const quote = await requestCreateQuote(
+      client,
+      WALLET,
+      hostile,
+      'https://cdn.example.com/cover.png',
+    );
+    expect(quote.paymentUsdc).toBe('50');
+
+    const sent = JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>;
+    expect(sent.wallet).toBe(WALLET);
+    // The domain markers and any smuggled key are never forwarded.
+    expect(sent).not.toHaveProperty('injection');
+    expect(sent).not.toHaveProperty('resolvable');
+    expect(sent).not.toHaveProperty('resolvability');
+  });
+
+  it('refuses a data: imageUrl before it reaches the network (Phase 4)', async () => {
+    const { client, calls } = routingClient({});
+    await expect(
+      requestCreateQuote(client, WALLET, draft, 'data:image/png;base64,AAAA'),
+    ).rejects.toThrow();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('sends the session wallet with the create id (Phase 3: cross-account build)', async () => {
+    const { client, calls } = routingClient({
+      '/markets/create/build/': {
+        body: {
+          transaction: 'SGVsbG8gUGFudGE=',
+          recentBlockhash: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+          lastValidBlockHeight: 300_000_000,
+          buildFingerprint: 'abc',
+          expiresAt: '2026-09-04T16:31:00.000000Z',
+        },
+      },
+    });
+    const build = await buildCreateTransaction(client, WALLET, 'cr_abc123');
+    expect(build.transaction).toBe('SGVsbG8gUGFudGE=');
+    const sent = JSON.parse(String(calls[0]?.init?.body)) as Record<string, unknown>;
+    expect(sent.createId).toBe('cr_abc123');
+    expect(sent.wallet).toBe(WALLET);
+  });
+
+  it('refuses an empty build transaction (Phase 2: nothing signable can reach a wallet)', async () => {
+    const { client } = routingClient({
+      '/markets/create/build/': {
+        body: {
+          transaction: '',
+          recentBlockhash: 'SandboxBlockhash11111111111111111111111111111',
+          lastValidBlockHeight: 0,
+          buildFingerprint: 'sandbox',
+          expiresAt: '2099-01-01T00:00:00Z',
+        },
+      },
+    });
+    await expect(
+      buildCreateTransaction(client, WALLET, 'cr_abc123'),
     ).rejects.toBeInstanceOf(PantaCallError);
   });
 });
