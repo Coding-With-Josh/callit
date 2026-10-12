@@ -38,20 +38,6 @@ import { useWallet } from "./use-wallet";
 import { clearServerSession, mirrorIdentityToken, mintSession } from "./session-client";
 import { AuthModal, type AuthModalMode } from "./auth-modal";
 
-/**
- * Bounded background mint attempts for an (authenticated, wallet) transition.
- *
- * `mintSession` already retries the token-readiness race internally (small
- * backoff, ~1s), so this is only the outer bound for a slower transient failure
- * — a Privy hiccup, or a token that takes a couple of seconds to appear. NOT
- * unbounded: a wallet that permanently cannot mint must not poll the session
- * route forever, and `authedJson` re-mints on demand when the user actually acts.
- * Worst case ~4s of background retries.
- */
-const MINT_MAX_ATTEMPTS = 3;
-/** Base backoff between background mint attempts (ms), scaled by attempt. */
-const MINT_RETRY_DELAY_MS = 1_500;
-
 function truncateAddress(addr: string): string {
   if (addr.length <= 10) return addr;
   return `${addr.slice(0, 4)}…${addr.slice(-5)}`;
@@ -97,15 +83,15 @@ export const WalletPill = () => {
   }, [identityToken]);
 
   // Server session mint: on logout reset; on (authenticated, wallet) transition
-  // mint until it lands. This is what makes requireAuth() real.
+  // mint once per wallet. This is what makes requireAuth() real.
   // Fail-closed: no wallet -> no mint attempt (the route would 403 anyway).
   //
-  // The ref records SUCCESS only. It used to be set BEFORE the attempt, which
-  // made one transient failure permanent: the effect never re-ran for that
-  // wallet, so the page kept a connected-looking pill with NO server session,
-  // and every guarded route answered 401 ("sign in") to a user who was in fact
-  // signed in. `mintSession` retries the token-readiness race internally; this
-  // retries the remaining transient kinds on a bounded backoff.
+  // The ref records SUCCESS only, so a transient failure is retried on the next
+  // render/action rather than being permanent. Deliberately NO retry loop here:
+  // `mintSession` already bounds itself, and an outer loop multiplied the calls
+  // into Privy's rate-limited token refresh, causing the 429s that made minting
+  // fail outright. `identityToken` is a dependency so that the cheap, cached
+  // token is used as soon as the SDK exposes it.
   React.useEffect(() => {
     if (!authenticated) {
       lastMintedWallet.current = "";
@@ -114,29 +100,15 @@ export const WalletPill = () => {
     if (!address || lastMintedWallet.current === address) return;
 
     let cancelled = false;
-    const run = async () => {
-      for (let attempt = 1; attempt <= MINT_MAX_ATTEMPTS; attempt += 1) {
-        if (cancelled || lastMintedWallet.current === address) return;
-        const result = await mintSession();
-        if (cancelled) return;
-        if (result.status === "ok") {
-          lastMintedWallet.current = address;
-          return;
-        }
-        // `no-wallet` is deterministic until the linked accounts change, so a
-        // retry cannot fix it — stop and leave the reason to the on-demand mint
-        // in authedJson, which reports it when the user actually acts.
-        if (result.status === "no-wallet") return;
-        await new Promise((resolve) =>
-          setTimeout(resolve, MINT_RETRY_DELAY_MS * attempt),
-        );
+    void mintSession().then((result) => {
+      if (!cancelled && result.status === "ok") {
+        lastMintedWallet.current = address;
       }
-    };
-    void run();
+    });
     return () => {
       cancelled = true;
     };
-  }, [authenticated, address]);
+  }, [authenticated, address, identityToken]);
 
   const handleConnect = () => {
     // Guarded: never open the flow before the SDK is ready (that path no-ops).

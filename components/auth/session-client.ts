@@ -1,8 +1,15 @@
 /**
  * auth/session-client — client-side helpers for the server session mint.
  *
- * Owns: calling POST /api/auth/session with a fresh Privy identity token, and
- * clearing the server session on logout. Client-only.
+ * Owns: calling POST /api/auth/session with a Privy identity token, and clearing
+ * the server session on logout. Client-only.
+ *
+ * COST MODEL (learned the hard way): the SDK's bare `getIdentityToken()` is NOT
+ * a cheap local read. It awaits `updateUserAndIdToken()`, which calls Privy's
+ * RATE-LIMITED `GET /api/v1/users/me`. Calling it per mint — and especially
+ * retrying it — earns 429s and makes the mint fail for a user who is
+ * demonstrably signed in. So a token we already hold is always preferred, and
+ * the refresh path is taken AT MOST ONCE per mint. There is no retry loop.
  *
  * Phase 2 (dependency down): a 503 from the route means Privy is unreachable;
  * we surface `unavailable` and never mint. The signed cookie is unchanged —
@@ -20,54 +27,39 @@ export interface SessionMintResult {
 }
 
 /**
- * Backoff between mint attempts (ms).
+ * Last-known identity token, mirrored out of the Privy SDK's own store by a
+ * component that subscribes to it (`useIdentityToken`).
  *
- * Why the retry exists: the Privy identity token is not reliably readable the
- * instant a SIWS login settles — `getIdentityToken()` can return null for a
- * moment after `loginWithSiws` resolves. A single-shot mint lost that race, and
- * because the caller recorded the attempt as done before it resolved, the user
- * was left with a connected-looking wallet and NO server session for the rest of
- * the page's life (every guarded route then 401s). Bounded: at most 3 attempts,
- * ~1s worst case.
- */
-const MINT_BACKOFF_MS = [250, 750] as const;
-
-/**
- * Last-resort identity token, mirrored out of the Privy SDK's own store by a
- * component that already subscribes to it (`useIdentityToken`).
- *
- * Why this exists: the bare `getIdentityToken()` reaches into a module-level
- * Privy client and `await`s a NETWORK refresh (`updateUserAndIdToken`) before it
- * reads the stored token — so it throws (or returns null) purely because that
- * refresh failed, discarding a perfectly usable token from the same store.
- * `mintSession` swallowing that throw is what left a connected wallet with no
- * server session. This is a read-only fallback for exactly that case.
- *
- * Not a new exposure: the value is already resident in the browser (the SDK
- * stores it) and it is never persisted, logged, or sent anywhere but the
- * session route. Held in memory for the life of the page.
+ * This is the PREFERRED token source precisely because reading it costs nothing
+ * — no network, no rate-limit budget, no throw. The SDK holds the token anyway
+ * (it stores it at login); this just lets us use it without triggering a
+ * refresh. Never persisted, logged, or sent anywhere but the session route.
  */
 let mirroredIdentityToken: string | null = null;
 
-/** Mirror the SDK's cached identity token for use as a last-resort fallback. */
+/** Mirror the SDK's cached identity token. */
 export function mirrorIdentityToken(token: string | null | undefined): void {
   mirroredIdentityToken =
     typeof token === 'string' && token.length > 0 ? token : null;
 }
 
-/** One mint attempt. Never throws. */
-async function attemptMint(): Promise<SessionMintResult> {
-  let token: string | null = null;
+/**
+ * Read a fresh token from the SDK. This MAY hit the rate-limited refresh
+ * endpoint, so callers must treat it as expensive. Never throws.
+ */
+async function readFreshIdentityToken(): Promise<string | null> {
   try {
-    token = await getIdentityToken();
+    const token = await getIdentityToken();
+    return typeof token === 'string' && token.length > 0 ? token : null;
   } catch {
-    token = null;
+    // A failed refresh is a failed refresh — never propagate it. The caller
+    // reports a fixed kind instead.
+    return null;
   }
-  // Fall back to the mirrored store value when the refresh path gave us nothing:
-  // a failed refresh must not cost a user who is demonstrably signed in.
-  if (!token) token = mirroredIdentityToken;
-  if (!token) return { status: 'no-token' };
+}
 
+/** POST one token to the session route. Never throws; never reads the body. */
+async function postSession(token: string): Promise<SessionMintResult> {
   let res: Response;
   try {
     res = await fetch('/api/auth/session', {
@@ -90,19 +82,29 @@ async function attemptMint(): Promise<SessionMintResult> {
 /**
  * Mint (or refresh) the signed server session for the current Privy user.
  *
- * Retries ONLY on `no-token` (a token that is not readable yet). A `rejected`
- * token, a 403, a 503 or a network failure will not change in 250ms, so those
- * return immediately and the caller can report them.
+ * At most TWO token reads and TWO requests, and the expensive refresh path only
+ * when we have nothing cached or the cached token was refused. Deliberately not
+ * a retry loop: the refresh endpoint is rate-limited, and a loop there is what
+ * caused the 429s that made this fail in the first place.
  */
 export async function mintSession(): Promise<SessionMintResult> {
-  let result = await attemptMint();
-  if (result.status !== 'no-token') return result;
-  for (const wait of MINT_BACKOFF_MS) {
-    await new Promise((resolve) => setTimeout(resolve, wait));
-    result = await attemptMint();
-    if (result.status !== 'no-token') return result;
+  const cached = mirroredIdentityToken;
+
+  if (cached) {
+    const result = await postSession(cached);
+    // Anything other than a refusal is a real answer — return it.
+    if (result.status !== 'rejected') return result;
+
+    // The cached token was refused (most likely expired). One refresh is
+    // justified; more than one is not.
+    const refreshed = await readFreshIdentityToken();
+    if (!refreshed || refreshed === cached) return result;
+    return postSession(refreshed);
   }
-  return result;
+
+  const fresh = await readFreshIdentityToken();
+  if (!fresh) return { status: 'no-token' };
+  return postSession(fresh);
 }
 
 /** Best-effort server session clear; failures are ignored (cookie TTLs out). */

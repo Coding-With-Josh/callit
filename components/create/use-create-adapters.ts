@@ -138,13 +138,16 @@ export function useCreateAdapters(): CreateAdapters {
       },
 
       /**
-       * Phase 3 (SSRF + fail-closed gate): the check runs server-side behind the
-       * session guard. An unreachable host, a timeout, or a failed route all come
-       * back `ok: false` — there is no path here that returns a pass on failure.
-       * A failed ROUTE, though, is not a verdict about the URL, so it is
-       * reported per status (`describeSourceCheckError`) rather than masked as
-       * one catch-all sentence — that masking is what hid a missing route
-       * behind "could not be checked right now".
+       * Phase 3 (SSRF + fail-closed gate): the check runs server-side. As of
+       * 2026-10-12 this route does NOT require a session, so the gate no longer
+       * depends on the wallet session mint (whose Privy token refresh is
+       * rate-limited and was failing). An unreachable host, a timeout, or a
+       * failed route all come back `ok: false` — there is no path here that
+       * returns a pass on failure.
+       *
+       * A failed ROUTE is not a verdict about the URL, so it is reported per
+       * status rather than masked as one catch-all sentence — that masking is
+       * what hid a missing route behind "could not be checked right now".
        */
       verifySource: async (url) => {
         const res = await authedJson('/api/sources/verify', {
@@ -153,10 +156,10 @@ export function useCreateAdapters(): CreateAdapters {
         });
         // The failure body is never read (Phase 2) — only the status number.
         if (!res.ok) {
-          // A 401 that a session mint could not fix is not "you are signed out":
-          // the session failure's own reason is the true one, and it is
-          // actionable. This is the case that showed "Connect your wallet to
-          // check sources" while the wallet pill was displaying a connected
+          // Should no longer occur now the route is anonymous, but if a 401 ever
+          // comes back it is not "you are signed out": report the session
+          // failure's own reason. This is the case that showed "Connect your
+          // wallet to check sources" while the wallet pill displayed a connected
           // wallet.
           if (res.sessionFailure) {
             return { ok: false, reason: describeSessionFailure(res.sessionFailure) };
