@@ -19,11 +19,13 @@ import { z } from 'zod';
 import {
   createIdSchema,
   eventPdaSchema,
+  marketIdSchema,
   unixSecondsSchema,
   unsignedTransactionB64Schema,
   usdcDecimalSchema,
   type CreateBuild,
   type CreateQuote,
+  type MarketId,
 } from '@/types';
 import type { SourceVerification } from '@/lib/create-market';
 
@@ -99,6 +101,26 @@ export function parseCreateBuild(data: unknown): CreateBuild {
 }
 
 /**
+ * The register route's response: the market id, and nothing else.
+ *
+ * Strict on purpose. Register is the money step, so a success must be proven by
+ * a plausible market id — a route that answered `{}` or a stray string must fail
+ * here rather than let the UI announce a market that does not exist. This is
+ * also the reason the schema is an object rather than a bare string: it leaves
+ * room to add a field (say, a confirmation status) without the client silently
+ * accepting the old shape.
+ */
+const createRegisterResponseSchema = z.object({
+  marketId: marketIdSchema,
+});
+
+export function parseCreateRegister(data: unknown): MarketId {
+  const parsed = createRegisterResponseSchema.safeParse(data);
+  if (!parsed.success) throw new CreateClientError();
+  return parsed.data.marketId;
+}
+
+/**
  * Phase 2 (fail closed): an unreadable verdict is a FAILED check, never a pass —
  * the same direction the server-side verifier fails in.
  */
@@ -156,4 +178,62 @@ export function describeCreateClientError(status: number): string {
   if (status === 503) return 'Market creation is temporarily unavailable.';
   if (status === 504) return "Panta didn't respond in time.";
   return 'The create request could not be completed.';
+}
+
+/**
+ * Fixed user copy for a failed REGISTER, keyed by the route's own status.
+ *
+ * Register needs its own copy because the shared create copy is actively wrong
+ * here. `describeCreateClientError(400)` says "that draft isn't valid for a
+ * market. Check the fields and try again." — but register's request has no
+ * fields to check, and by this stage the draft is settled: the transaction is
+ * already signed. Pointing the user at the draft would send them to edit a claim
+ * that was never the problem.
+ *
+ * The single most important property of this copy is that it never claims the
+ * money did NOT move unless that is certain. Register can fail in ways where the
+ * submission's fate is genuinely unknown (a timeout, or an upstream 5xx after
+ * the request was accepted), and Panta's own "createId not found or already
+ * consumed" cannot distinguish "never submitted" from "already created" — in the
+ * second case the market exists and the fee WAS charged. So:
+ *
+ *   - a failure where nothing was submitted says so plainly and offers a retry;
+ *   - a failure that is unconfirmed says "couldn't confirm" and sends the user
+ *     to look at their markets before retrying, rather than reassuring them.
+ *
+ * Retrying is nonetheless safe by construction: the `createId` is single-use
+ * upstream, so a retry that is not needed is refused rather than duplicated.
+ */
+export function describeRegisterClientError(status: number): string {
+  // 401/403 is OUR session guard: an upstream auth failure is mapped to 502
+  // before it can reach here, so this one really is about the user's session.
+  if (status === 401 || status === 403) return 'Sign in to continue.';
+  // Our perimeter refused the body, or Panta refused the submission outright
+  // (e.g. a signature that does not match). Nothing was submitted, and a failed
+  // submission does not consume the create session, so a retry is safe to offer.
+  if (status === 400) {
+    return 'The submission was refused, so nothing was submitted. You can try again.';
+  }
+  // The create session is finished: gone, or already consumed by an earlier
+  // successful register. We cannot tell which, so we must not assert that
+  // nothing was charged — a market may exist and the fee may have moved.
+  if (status === 409) {
+    return 'This create session was already used or has expired. If you signed it, check your markets first — a market may have been created.';
+  }
+  if (status === 429) return 'Too many requests — wait a moment and try again.';
+  // 410: Panta holds no transaction for this create session — it was never
+  // built, or the built blockhash expired (the live hint is ~60s). It cannot
+  // have submitted something it does not hold, so nothing was charged; but
+  // retrying the SAME signature would fail identically, because the transaction
+  // itself is gone. The copy has to say "rebuild", not "try again".
+  if (status === 410) {
+    return 'Panta no longer has this transaction, so nothing was submitted. Go back to the draft and build it again.';
+  }
+  // 502 (upstream failure, network failure, or Panta rejecting our key) and 504
+  // (timeout) are both UNCONFIRMED: the request may have been accepted before
+  // the connection broke. Never reassure; send the user to their own record.
+  if (status === 502 || status === 503 || status === 504 || status === 0) {
+    return "We couldn't confirm the submission. Check your markets before trying again — a market may have been created.";
+  }
+  return 'The market could not be submitted.';
 }

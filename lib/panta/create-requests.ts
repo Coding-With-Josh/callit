@@ -21,6 +21,7 @@ import {
   createIdSchema,
   marketCategorySlugSchema,
   marketTypeWireSchema,
+  txSignatureSchema,
 } from '@/types';
 
 /**
@@ -68,6 +69,26 @@ export const createBuildBodySchema = z.strictObject({
   createId: createIdSchema,
 });
 
+/**
+ * POST /api/panta/create/register body — the create session id and the wallet's
+ * signature over the transaction Panta built for it.
+ *
+ * Phase 3 (wallet substitution): like the quote and build bodies, there is
+ * deliberately NO `wallet` field, and the object is STRICT. Register's upstream
+ * contract is `{ createId, signature }` and accepts no wallet either, so there
+ * is nothing here a caller could use to redirect whose market gets created: the
+ * `createId` was already bound to a wallet when the quote that produced it was
+ * requested with `auth.wallet`.
+ *
+ * Both fields are branded on the way in. A `signature` that is not base58 of
+ * plausible signature length, or a `createId` that is not one of ours, is a 400
+ * at the perimeter — the route never calls Panta to find that out.
+ */
+export const createRegisterBodySchema = z.strictObject({
+  createId: createIdSchema,
+  signature: txSignatureSchema,
+});
+
 /** POST /api/sources/verify body — the SSRF-guarded reachability check. */
 export const sourceVerifyBodySchema = z.strictObject({
   url: z.string().min(1).max(2048),
@@ -75,4 +96,5 @@ export const sourceVerifyBodySchema = z.strictObject({
 
 export type CreateQuoteBody = z.infer<typeof createQuoteBodySchema>;
 export type CreateBuildBody = z.infer<typeof createBuildBodySchema>;
+export type CreateRegisterBody = z.infer<typeof createRegisterBodySchema>;
 export type CreateQuoteDraftBody = z.infer<typeof createQuoteDraftSchema>;

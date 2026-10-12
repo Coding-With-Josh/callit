@@ -4,8 +4,8 @@
  * use-create-adapters — the LIVE `CreateAdapters` for the create wizard.
  *
  * Owns: swapping the wizard's in-process fixture stub for the real surface —
- * our own proxy routes (create quote, create build, source verify, categories),
- * the session wallet's signer, and the wall clock.
+ * our own proxy routes (create quote, create build, create register, source
+ * verify, categories), the session wallet's signer, and the wall clock.
  * Must not import: any server-only module (this file ships to the browser).
  *
  * Phase 1 (complete mediation): every call goes to an app route that
@@ -27,9 +27,11 @@ import { authedJson } from '@/components/auth/authed-json';
 import { describeAuthedFailure } from '@/lib/auth/session-mint';
 import {
   describeCreateClientError,
+  describeRegisterClientError,
   describeSourceCheckError,
   parseCreateBuild,
   parseCreateQuote,
+  parseCreateRegister,
   parseSourceVerdict,
 } from '@/lib/create/client';
 import type { CreateAdapters } from '@/lib/create-market';
@@ -49,10 +51,14 @@ const DAY_SECONDS = 86_400;
  * The public image URL sent with the create quote while no image host is wired.
  *
  * The wire contract requires a public http(s) URL and rejects data URLs, so the
- * templated card the wizard renders (lib/create-image) cannot be sent as-is. This
- * app never registers a market, so the placeholder only ever lives on a
- * throwaway create session — it never becomes a live market's artwork. Replace
- * with the real upload handshake when image hosting lands.
+ * templated card the wizard renders (lib/create-image) cannot be sent as-is.
+ *
+ * WARNING (this changed when register was wired): the placeholder is no longer
+ * confined to a throwaway create session. Registration submits the transaction
+ * for real, so this URL becomes the ARTWORK OF A LIVE MARKET and is effectively
+ * permanent. It must be replaced with the real upload handshake (lib/create-image
+ * + the P5b Cloudinary step) before creation is offered to real users. The
+ * wizard warns on the create button for exactly this reason.
  */
 export const LIVE_COVER_PLACEHOLDER_URL = 'https://picsum.photos/1024';
 
@@ -251,12 +257,46 @@ export function useCreateAdapters(): CreateAdapters {
       },
 
       /**
-       * Registration is deliberately NOT wired: it is the only step that moves
-       * real funds, and no route for it exists. Fail closed if it is ever
-       * reached instead of silently pretending a market was created.
+       * signed -> registered. THE money step: this is the only call in the app
+       * that can make a market exist on-chain and move real funds, because Panta
+       * submits the transaction the user just signed.
+       *
+       * Three properties are deliberate:
+       *  - It is a SEPARATE, explicit action. Signing is not submitting; the user
+       *    confirms the submission on its own button, with the fee and the
+       *    irreversibility warning on that button (see the wizard's sign step).
+       *  - The wallet is NOT sent. Register's wire contract is exactly
+       *    `{ createId, signature }`, and the `createId` was already bound to the
+       *    session wallet by the quote that produced it. The signature is the
+       *    authority: only the transaction's own fee payer can produce one, so a
+       *    caller cannot submit a market for a wallet they do not hold.
+       *  - A retry cannot double-charge. The upstream `createId` is single-use
+       *    ("not found or already consumed"), so a duplicate submit is refused —
+       *    which is also why the copy never promises a retry is free when the
+       *    outcome is genuinely unknown (see describeRegisterClientError).
+       *
+       * Phase 2 (no internals leak / no fabricated success): the response is
+       * parsed through a strict schema, never displayed, and a failure is fixed
+       * copy keyed by our own status. `parseCreateRegister` refuses a response
+       * with no usable market id rather than letting the UI announce a market.
        */
-      register: async () => {
-        throw new Error('Registering a market is not available yet.');
+      register: async (quote, signature) => {
+        const res = await authedJson('/api/panta/create/register', {
+          method: 'POST',
+          body: { createId: quote.createId, signature },
+        });
+        if (!res.ok) {
+          // A register failure has its own vocabulary: the create copy would
+          // tell the user to go and edit a draft that is already signed.
+          throw new Error(
+            describeAuthedFailure(
+              res.status,
+              res.sessionFailure,
+              describeRegisterClientError,
+            ),
+          );
+        }
+        return parseCreateRegister(res.data);
       },
     }),
     [sign],

@@ -8,7 +8,7 @@
  * are signed out", which told a signed-in user to sign in.
  */
 import { describe, expect, it } from 'vitest';
-import { transportErrorStatus } from './transport-status';
+import { registerErrorStatus, transportErrorStatus } from './transport-status';
 import type { PantaTransportError } from './client';
 
 const http = (status: number): PantaTransportError => ({
@@ -60,6 +60,92 @@ describe('transportErrorStatus', () => {
       const status = transportErrorStatus(error);
       expect(status).not.toBe(401);
       expect(status).not.toBe(403);
+    }
+  });
+});
+
+describe('registerErrorStatus', () => {
+  const known = (status: number, code: string): PantaTransportError => ({
+    kind: 'http',
+    status,
+    error: { kind: 'known', code: code as never, message: 'upstream failure' },
+  });
+
+  it('turns a consumed/expired create session into a 409, not a 400', () => {
+    // Forwarding 400 here made the client say "that draft isn't valid for a
+    // market. Check the fields and try again." — about a request whose only
+    // fields are an id and a signature. Verified live: Panta answers
+    // 400 CREATE_EXPIRED for a createId that is gone OR already consumed.
+    expect(registerErrorStatus(known(400, 'CREATE_EXPIRED'))).toBe(409);
+  });
+
+  it('turns a duplicate market into a 409', () => {
+    expect(registerErrorStatus(known(400, 'DUPLICATE_MARKET'))).toBe(409);
+  });
+
+  it('leaves a submission failure as its own 400 (retryable, not "consumed")', () => {
+    // Verified live: a bad signature for a REAL createId returns
+    // 400 INVALID_MARKET_PARAMS "unexpected create register failure" — and does
+    // NOT consume the createId. It must not be reported as a finished session.
+    expect(registerErrorStatus(known(400, 'INVALID_MARKET_PARAMS'))).toBe(400);
+  });
+
+  it('does not read an UNKNOWN code as a finished session', () => {
+    // Fail closed: a novel code must not be guessed into the "already used"
+    // bucket, which would tell the user a market exists when we do not know.
+    const unknown: PantaTransportError = {
+      kind: 'http',
+      status: 400,
+      error: { kind: 'unknown', rawCode: 'SOMETHING_NEW', message: 'x' },
+    };
+    expect(registerErrorStatus(unknown)).toBe(400);
+  });
+
+  it('marks a missing transaction as 410 (gone), NOT as a finished session', () => {
+    // Verified live: a real createId that was never built answers
+    // 404 TX_NOT_FOUND. Panta cannot submit a transaction it does not hold, so
+    // nothing was charged and a retry is meaningful (after a rebuild). Reporting
+    // the ambiguous 409 here would tell the user a market may exist when it
+    // cannot — a false statement in the alarming direction.
+    expect(registerErrorStatus(known(404, 'TX_NOT_FOUND'))).toBe(410);
+  });
+
+  it('does not give an unrecognised 404 the "nothing was submitted" treatment', () => {
+    // Fail closed: only the code actually observed live earns that claim.
+    const unknown: PantaTransportError = {
+      kind: 'http',
+      status: 404,
+      error: { kind: 'unknown', rawCode: 'SOMETHING_NEW_404', message: 'x' },
+    };
+    expect(registerErrorStatus(unknown)).toBe(404);
+  });
+
+  it('delegates everything else to the shared mapping', () => {
+    expect(registerErrorStatus(known(401, 'UNAUTHORIZED'))).toBe(502);
+    expect(registerErrorStatus(known(500, 'INTERNAL_ERROR'))).toBe(502);
+    expect(registerErrorStatus({ kind: 'timeout', timeoutMs: 1 })).toBe(504);
+    expect(registerErrorStatus({ kind: 'network', message: 'down' })).toBe(502);
+    // A 409 upstream is already the right shape; only 400 needs re-reading.
+    expect(registerErrorStatus(known(409, 'DUPLICATE_MARKET'))).toBe(409);
+  });
+
+  it('never returns 401 or 403 for any register failure', () => {
+    const all: readonly PantaTransportError[] = [
+      known(400, 'CREATE_EXPIRED'),
+      known(400, 'DUPLICATE_MARKET'),
+      known(400, 'INVALID_MARKET_PARAMS'),
+      known(404, 'TX_NOT_FOUND'),
+      known(401, 'UNAUTHORIZED'),
+      known(403, 'FORBIDDEN'),
+      known(500, 'INTERNAL_ERROR'),
+      { kind: 'timeout', timeoutMs: 1 },
+      { kind: 'config', message: 'x' },
+      { kind: 'network', message: 'x' },
+      { kind: 'malformed', message: 'x' },
+    ];
+    for (const error of all) {
+      expect(registerErrorStatus(error)).not.toBe(401);
+      expect(registerErrorStatus(error)).not.toBe(403);
     }
   });
 });

@@ -2,6 +2,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import Link from "next/link";
 import { Link2, Loader2, Pencil, Plus, X } from "lucide-react";
 import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import { useSolanaSigner } from "@/components/auth/use-solana-signer";
@@ -14,6 +15,7 @@ import {
   editDraft,
   effectiveStartSeconds,
   openQuoteStep,
+  registerStep,
   requireVerifiedSource,
   signStep,
   uploadCoverStep,
@@ -57,12 +59,16 @@ import {
  * Sign-step scope: the island drives the REAL create pipeline — the quote and
  * build come from Panta through this app's own routes (app/api/panta/create/*,
  * which re-authenticate the session and bind the wallet server-side), and the
- * signature the user produces is over Panta's own create transaction. It is
- * never broadcast and the market is never registered: `registerStep` has no
- * route behind it, so a create stops at `signed` by construction.
+ * signature the user produces is over Panta's own create transaction.
+ *
+ * It is NOT broadcast by that signature. Registering the market — the one
+ * irreversible, money-moving step, where Panta submits the signed transaction —
+ * is a SECOND, explicitly separate action behind its own button (see `onCreate`
+ * below), so that signing a transaction never silently submits it. The create
+ * therefore stops at `signed` until the user asks for it to be submitted.
  */
 
-const STEPS = ["Claim", "Draft", "Resolve", "Quote", "Sign"] as const;
+const STEPS = ["Claim", "Draft", "Resolve", "Quote", "Sign", "Create"] as const;
 
 type StageState = "active" | "done" | "locked";
 type WizardStatus = "intake" | CreateLifecycle["status"];
@@ -110,21 +116,28 @@ const checksRecord = (
  * wallet is ever prompted, so a user who lingered on the review step cannot sign
  * an expired transaction.
  *
- * The transaction signed here is Panta's own create transaction. It is NOT
- * broadcast and the market is NOT registered — nothing is submitted.
+ * The transaction signed here is Panta's own create transaction. Signing it
+ * submits nothing: the signature is kept and handed over by a separate, explicit
+ * action (the "Create market" button on the signed phase below), which is the
+ * only thing in this app that can move money.
  */
 const SignStep = ({
   phase,
   busy,
   signature,
+  fee,
   onBuild,
   onSign,
+  onCreate,
 }: {
   phase: "quoted" | "built" | "signed";
   busy: boolean;
   signature: string | null;
+  /** The quoted creation fee, as domain copy. Shown on the submit button. */
+  fee: string;
   onBuild: () => void;
   onSign: () => void;
+  onCreate: () => void;
 }) => {
   const { ready, authenticated, unavailable, login } = usePrivyGate();
   const { ready: signerReady } = useSolanaSigner();
@@ -152,10 +165,28 @@ const SignStep = ({
 
   if (phase === "signed") {
     return (
-      <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
-        Signed {signature ? formatSignatureShort(signature) : ""} — nothing
-        submitted or registered.
-      </p>
+      <div className="flex flex-col gap-3">
+        <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
+          Signed {signature ? formatSignatureShort(signature) : ""} — not
+          submitted yet.
+        </p>
+        <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
+          This is the last step, and the only one that cannot be undone.
+          Submitting hands your signature to Panta, which puts the market
+          on-chain and moves <span className="font-semibold">{fee} USDC</span> from
+          your wallet. Signing above did not spend anything — this does.
+        </p>
+        <button
+          type="button"
+          disabled={busy}
+          aria-busy={busy}
+          onClick={onCreate}
+          className="flex w-full items-center justify-center gap-2 rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
+        >
+          {busy && <Loader2 className="size-4 animate-spin" />}
+          {busy ? "Creating…" : `Create market — ${fee} USDC`}
+        </button>
+      </div>
     );
   }
 
@@ -185,8 +216,8 @@ const SignStep = ({
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
-        Your wallet signs Panta&apos;s create transaction. It is never broadcast
-        and the market is not registered — nothing is submitted.
+        Your wallet signs Panta&apos;s create transaction. Signing does not
+        submit it — you confirm the submission as a separate final step.
       </p>
       <button
         type="button"
@@ -402,9 +433,14 @@ export const CreateWizard = () => {
       case "create_expired":
         return 3;
       case "built":
-      case "signed":
-      case "registered":
         return 4;
+      // Signing is its own step; submitting the signed transaction is the last
+      // one, so `signed` sits ON "Create" rather than having finished the flow.
+      case "signed":
+        return 5;
+      // Past the end: on the terminal success every label reads as done.
+      case "registered":
+        return STEPS.length;
       default:
         return 0;
     }
@@ -559,6 +595,29 @@ export const CreateWizard = () => {
       setLifecycle(signed.value);
     });
 
+  /**
+   * signed -> registered. The ONLY action in this app that submits anything, and
+   * the only one that can move money: the pipeline's `registerStep` re-checks the
+   * transition table, and the adapter hands the signature to our own route, which
+   * re-authenticates the session before Panta is ever called.
+   *
+   * Kept separate from signing on purpose. Signing produces a signature over
+   * Panta's transaction and submits nothing; this hands that signature over. The
+   * two are deliberately different buttons so the irreversible step cannot happen
+   * as a side effect of the wallet prompt.
+   */
+  const onRegister = () =>
+    run(async () => {
+      if (!lifecycle || lifecycle.status !== "signed") return;
+      setError(null);
+      const registered = await registerStep(lifecycle, adapters);
+      if (!registered.ok) {
+        setError(registered.error);
+        return;
+      }
+      setLifecycle(registered.value);
+    });
+
   const onStartOver = () => {
     setClaim("");
     setRaw(null);
@@ -585,6 +644,19 @@ export const CreateWizard = () => {
       ? status
       : null;
 
+  /**
+   * The quoted fee, rendered on the submit button itself. The fee authority is
+   * the QUOTE (never a re-derived number), and it is shown on the button rather
+   * than only in the section above it, because this is the button that spends it.
+   */
+  const signFee: string | null =
+    lifecycle &&
+    (lifecycle.status === "quoted" ||
+      lifecycle.status === "built" ||
+      lifecycle.status === "signed")
+      ? formatUsdc(lifecycle.quote.paymentUsdc)
+      : null;
+
   const categoryOptions = useMemo(() => {
     const set = new Set(categories);
     if (raw?.category) set.add(raw.category);
@@ -602,7 +674,8 @@ export const CreateWizard = () => {
         </h1>
         <p className="mt-4 max-w-xl text-sm font-medium leading-relaxed tracking-tight text-[#2D1C00]/70 md:text-base">
           Paste the claim, shape how it resolves, see the fee from Panta&apos;s
-          quote, then sign. Nothing is charged until you sign.
+          quote, then sign. Signing costs nothing — the fee is charged only when
+          you create the market, on the last step.
         </p>
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <PantaBadge />
@@ -1099,7 +1172,7 @@ export const CreateWizard = () => {
           </Section>
         )}
 
-        {/* 05 — Sign (gated; hard stop on signing) */}
+        {/* 05 — Sign (gated; hard stop before signing) */}
         {signPhase && (
           <Section index={5} title="Sign" state="active">
             <SignStep
@@ -1108,10 +1181,38 @@ export const CreateWizard = () => {
               signature={
                 lifecycle?.status === "signed" ? lifecycle.signature : null
               }
+              fee={signFee ?? ""}
               onBuild={onBuildTransaction}
               onSign={onSignTransaction}
+              onCreate={onRegister}
             />
-            {signPhase !== "signed" && <ErrorPanel error={error} />}
+            <ErrorPanel error={error} />
+          </Section>
+        )}
+
+        {/* 06 — Create: the submitted market. Terminal success. */}
+        {lifecycle?.status === "registered" && (
+          <Section index={6} title="Create" state="active">
+            <div className="flex flex-col gap-4">
+              <div>
+                <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
+                  The market is live. Your signature was submitted, the market
+                  was created on-chain, and the creation fee was charged.
+                </p>
+                <p className="mt-2 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/50">
+                  {lifecycle.marketId}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Link
+                  href={`/markets/${lifecycle.marketId}`}
+                  className="rounded-full bg-[#2D1C00] px-5 py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none"
+                >
+                  Open market
+                </Link>
+                <Pill onClick={onStartOver}>Create another</Pill>
+              </div>
+            </div>
           </Section>
         )}
 

@@ -89,7 +89,7 @@ export async function requirePantaAuth(
  * whose preflight passed but whose error response omits
  * `Access-Control-Allow-Origin` fails opaquely) consume it from this module.
  */
-export { transportErrorStatus } from './transport-status';
+export { registerErrorStatus, transportErrorStatus } from './transport-status';
 
 /**
  * A user-safe message for a transport error. The body carries only this string —

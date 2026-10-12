@@ -35,6 +35,7 @@ import {
   unsignedTransactionB64Schema,
   unixSeconds,
   type CreateBuild,
+  type CreateId,
   type CreateQuote,
   type DataProvenance,
   type ImageUploadResponse,
@@ -229,6 +230,44 @@ export async function buildCreateTransaction(
   }));
 }
 
+/**
+ * Submit the signed create; returns the on-chain market id. THE money step.
+ *
+ * Register is the only call in the app that makes a market exist and a payment
+ * move: Panta holds the transaction it built for this `createId`, and this hands
+ * over the wallet's signature for it so Panta can submit it. We never broadcast.
+ *
+ * Phase 3 (replay / double-submit): the upstream `createId` is SINGLE-USE —
+ * a second register for the same id is answered `CREATE_EXPIRED` ("not found or
+ * already consumed"), verified against the live API. A double-click therefore
+ * cannot create two markets. The converse is also verified and is what makes a
+ * retry safe: a FAILED submission (e.g. a signature that does not match) does
+ * NOT consume the `createId`, so the user can try again with a good signature
+ * rather than losing the session.
+ *
+ * Phase 2 (fail closed): `marketId` is parsed through its branded schema, so a
+ * malformed or absent id is a refusal rather than a fabricated success. The
+ * upstream `status` is deliberately NOT used as the success test: a response
+ * that carries a market id means the market exists, and gating on a status
+ * string we have never observed live could reject a creation that DID happen —
+ * after the user's money moved. The id is the proof.
+ */
+export async function registerCreate(
+  client: PantaClient,
+  createId: CreateId,
+  signature: TxSignature,
+): Promise<MarketId> {
+  const body = registerRequestSchema.parse({ createId, signature });
+  const result = await client.request({
+    method: 'POST',
+    path: '/markets/register/',
+    body,
+    schema: registerResponseSchema,
+  });
+  if (!result.ok) throw new PantaCallError(result.error);
+  return mapOrThrow(() => marketIdSchema.parse(result.value.marketId));
+}
+
 /** Build the real HTTP-backed create adapters. */
 export function createPantaCreateAdapters(
   config: PantaCreateAdapterConfig,
@@ -269,18 +308,7 @@ export function createPantaCreateAdapters(
       quote: CreateQuote,
       signature: TxSignature,
     ): Promise<MarketId> {
-      const body = registerRequestSchema.parse({
-        createId: quote.createId,
-        signature,
-      });
-      const result = await config.client.request({
-        method: 'POST',
-        path: '/markets/register/',
-        body,
-        schema: registerResponseSchema,
-      });
-      if (!result.ok) throw new PantaCallError(result.error);
-      return mapOrThrow(() => marketIdSchema.parse(result.value.marketId));
+      return registerCreate(config.client, quote.createId, signature);
     },
   };
 }
