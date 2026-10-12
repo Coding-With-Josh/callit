@@ -49,10 +49,20 @@ export const knownPantaErrorCodeSchema = z.enum(KNOWN_PANTA_ERROR_CODES);
  * The raw Panta error body: { code, message, field?, fields? }. `field` is a
  * single offending field (e.g. "startTime"); `fields` is the serializer shape,
  * a per-field list of messages. Unknown keys are ignored.
+ *
+ * `message` is OPTIONAL, on live evidence: the register endpoint answers a
+ * missing transaction with exactly `{"code":"TX_NOT_FOUND"}` and no message.
+ * Requiring it here did not merely drop a display string — the whole envelope
+ * failed to parse, so the real CODE was discarded and replaced with a synthetic
+ * `HTTP_<status>` (see the client's error branch). Every code-driven decision
+ * was then wrong for those responses: `classifyPantaError` could not see that
+ * TX_NOT_FOUND is retryable, and a caller could not tell "Panta holds no
+ * transaction" from "we do not know what happened". The code is the contract;
+ * the message is human-facing and may be absent.
  */
 export const pantaErrorBodySchema = z.object({
   code: z.string(),
-  message: z.string(),
+  message: z.string().optional(),
   field: z.string().optional(),
   fields: z.record(z.string(), z.array(z.string())).optional(),
 });
@@ -139,7 +149,14 @@ export function parsePantaError(
   retryAfterSeconds?: number,
 ): PantaError {
   const base: PantaErrorBase = {
-    message: body.message,
+    // Never invent text from upstream, but never drop the code over a missing
+    // message either — a neutral placeholder carries the status instead. The
+    // placeholder is derived from our own status, never from the response.
+    message:
+      body.message ??
+      (status !== undefined
+        ? `Panta returned HTTP ${status}`
+        : 'Panta request failed'),
     ...(body.field !== undefined ? { field: body.field } : {}),
     ...(body.fields !== undefined ? { fields: body.fields } : {}),
     ...(status !== undefined ? { status } : {}),

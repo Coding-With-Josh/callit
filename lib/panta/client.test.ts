@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
+import { isRetryable } from '@/types';
 import {
   createPantaClient,
   pantaClientFromEnv,
@@ -120,6 +121,33 @@ describe('panta client — fail closed', () => {
         expect(result.error.error.rawCode).toBe('HTTP_502');
       }
       expect(JSON.stringify(result.error.error)).not.toContain('leaked');
+    }
+  });
+
+  it('keeps a real error code when Panta omits the message', async () => {
+    // Live: register answers a missing transaction with exactly
+    // `{"code":"TX_NOT_FOUND"}` — a code with no message. Requiring `message`
+    // made the whole envelope fail to parse, which silently replaced the code
+    // with a synthetic `HTTP_404` and hid the fact that TX_NOT_FOUND is
+    // retryable. The code is the contract; the message is not.
+    const { impl } = fakeFetch(jsonResponse({ code: 'TX_NOT_FOUND' }, 404));
+    const result = await client(impl).request({
+      method: 'POST',
+      path: '/markets/register/',
+      schema: okSchema,
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok && result.error.kind === 'http') {
+      expect(result.error.status).toBe(404);
+      expect(result.error.error.kind).toBe('known');
+      if (result.error.error.kind === 'known') {
+        expect(result.error.error.code).toBe('TX_NOT_FOUND');
+      }
+      // Neutral placeholder derived from OUR status — never upstream text.
+      expect(result.error.error.message).toBe('Panta returned HTTP 404');
+      expect(isRetryable(result.error.error)).toBe(true);
+    } else {
+      throw new Error('expected an http error');
     }
   });
 
