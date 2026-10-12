@@ -109,6 +109,14 @@ export const BrowseExplorer = ({
     [items],
   );
 
+  // Panta fills odds/volume only when its RPC read succeeds; a degraded page
+  // carries every row with a null price. Say so once, rather than leaving a
+  // column of bare placeholders that reads as a broken UI (Phase 2: the
+  // degraded state must be distinguishable from a rendering bug).
+  const pricesUnavailable =
+    presentable.length > 0 &&
+    presentable.every((item) => item.market.yesPrice === null);
+
   // Every filter change resets the window to the first page IN THE SAME handler,
   // so "Load more" can never leave the user deep inside a list whose top they can
   // no longer reason about. Done here rather than in an effect: a synchronous
@@ -267,6 +275,13 @@ export const BrowseExplorer = ({
               </p>
             )}
 
+            {pricesUnavailable && (
+              <p className="mt-3 rounded-xl bg-[#2D1C00]/5 px-3 py-2 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/55">
+                Live odds are unavailable from Panta right now — markets are
+                listed without prices.
+              </p>
+            )}
+
             {filtered.length === 0 ? (
               <NoMatches onClear={clearFilters} />
             ) : (
@@ -372,7 +387,9 @@ const MarketRow = ({ fixture }: { fixture: MarketFixture }) => {
             </p>
           ) : (
             <p className="font-tusker-9800 text-2xl leading-none tracking-tight text-[#2D1C00]/30">
-              —
+              <span aria-hidden="true">—</span>
+              {/* Screen readers read the dash as punctuation without this. */}
+              <span className="sr-only">Odds unavailable</span>
             </p>
           )}
           <p className="mt-1 font-mono text-[10px] tracking-tight text-[#2D1C00]/40">
