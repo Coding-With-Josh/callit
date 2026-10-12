@@ -49,6 +49,7 @@ import {
 } from '@/types';
 import {
   assembleBuyOrder,
+  describeBuyReportError,
   parseBuiltOrder,
   parseBuyQuote,
   verifyBuyOrder,
@@ -101,29 +102,6 @@ function requestErrorMessage(status: number): string {
   if (status === 503) return 'Trading is temporarily unavailable.';
   if (status === 504) return "Panta didn't respond in time.";
   return 'The order could not be prepared.';
-}
-
-/**
- * Fixed copy for the REPORT step (submitting the already-broadcast order to
- * Panta), keyed by our own status and never by the response body.
- *
- * Separate from `requestErrorMessage` because the meaning of a failure changed:
- * the order is already on-chain by the time this runs, so a 400 ("that order
- * isn't valid") would be a false statement about the user's input at the exact
- * moment their money may have moved. Nothing here may claim the order did not
- * happen (Phase 3: false reassurance after money moved).
- */
-function reportErrorMessage(status: number): string {
-  if (status === 401 || status === 403) return 'Sign in to continue.';
-  if (status === 429) return 'Too many requests — wait a moment and try again.';
-  if (status === 409) {
-    // Terminal, and the most dangerous case to word badly: Panta refused the
-    // report itself (a stale quote — QUOTE_EXPIRED), and the ORDER IS STILL
-    // ON-CHAIN. The user is told to check their positions, not that nothing
-    // happened.
-    return 'Your order was submitted, but Panta refused to record it — the quote it was built from had expired. Check your positions before buying again.';
-  }
-  return "Your order was submitted, but Panta hasn't recorded it yet. Check your positions before buying again.";
 }
 
 export interface BuyOrderController {
@@ -338,7 +316,7 @@ export function useBuyOrder(): BuyOrderController {
         describeAuthedFailure(
           reported.status,
           reported.sessionFailure,
-          reportErrorMessage,
+          describeBuyReportError,
         ),
       );
       return;
@@ -367,7 +345,7 @@ export function useBuyOrder(): BuyOrderController {
         describeAuthedFailure(
           reported.status,
           reported.sessionFailure,
-          reportErrorMessage,
+          describeBuyReportError,
         ),
       );
       return;

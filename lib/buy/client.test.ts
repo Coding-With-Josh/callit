@@ -13,6 +13,7 @@ import {
   assembleBuyOrder,
   describeAssembleError,
   describeBuyClientError,
+  describeBuyReportError,
   parseBuiltOrder,
   parseBuyQuote,
   verifyBuyOrder,
@@ -186,5 +187,68 @@ describe('describeAssembleError / describeBuyClientError', () => {
     expect(describeAssembleError({ kind: 'encode-failed', message: 'x' }).length).toBeGreaterThan(0);
     expect(describeBuyClientError({ kind: 'malformed-quote' }).length).toBeGreaterThan(0);
     expect(describeBuyClientError({ kind: 'order-mismatch', field: 'side' }).length).toBeGreaterThan(0);
+  });
+});
+
+/**
+ * The REPORT step runs only after the wallet has SUBMITTED the transaction, so
+ * every outcome it can report is about an order that may already be on-chain and
+ * funds that may already have moved. This is the same invariant the create side
+ * guards on register (Phase 3: false reassurance after money moved) — the failure
+ * mode being prevented is a user who is told their buy did not happen going back
+ * and buying a second one.
+ */
+describe('describeBuyReportError', () => {
+  it('returns fixed copy per status and never echoes an upstream string', () => {
+    const statuses = [0, 400, 401, 403, 404, 409, 429, 500, 502, 503, 504];
+    for (const status of statuses) {
+      const message = describeBuyReportError(status);
+      expect(message.length).toBeGreaterThan(0);
+      expect(message).not.toContain(String(status));
+      // Never a Panta code or any upstream text.
+      expect(message).not.toMatch(/QUOTE_EXPIRED|TX_NOT_FOUND/);
+    }
+  });
+
+  it('never claims nothing happened, because the order is already on-chain', () => {
+    for (const status of [0, 400, 404, 409, 500, 502, 503, 504]) {
+      expect(describeBuyReportError(status)).not.toMatch(
+        /nothing was (submitted|broadcast|charged)|did not happen|no money/i,
+      );
+    }
+  });
+
+  it("sends every ambiguous report failure to the user's own positions", () => {
+    for (const status of [0, 400, 404, 500, 502, 503, 504]) {
+      expect(describeBuyReportError(status)).toMatch(/check your positions/i);
+    }
+  });
+
+  it('describes a transient failure as submitted and not yet recorded', () => {
+    // 503 is the visibility lag (Panta indexes from the chain) surviving the
+    // client's bounded retries: the submission is not in question, and repeating
+    // it re-sends the SAME signed order, so it cannot buy twice.
+    const pending = describeBuyReportError(503);
+    expect(pending).toMatch(/submitted/i);
+    expect(pending).toMatch(/hasn't recorded it yet/i);
+  });
+
+  it('describes a 409 as refused-by-Panta with no retry implied', () => {
+    // Our route maps the live upstream refusal (400 QUOTE_EXPIRED) to 409. The
+    // order is still on-chain, so the copy says refused and sends the user to
+    // check positions rather than offering a retry that is known to fail.
+    const refused = describeBuyReportError(409);
+    expect(refused).toMatch(/refused to record it/i);
+    expect(refused).toMatch(/check your positions/i);
+    expect(refused).not.toMatch(/report(ing)? again/i);
+  });
+
+  it('never renders a report failure as "sign in"', () => {
+    // 502 is our wrapper around an upstream fault, including Panta rejecting OUR
+    // key. No user action fixes that, and a connected wallet must not be told to
+    // sign in.
+    for (const status of [0, 400, 404, 409, 429, 500, 502, 503, 504]) {
+      expect(describeBuyReportError(status)).not.toBe('Sign in to continue.');
+    }
   });
 });

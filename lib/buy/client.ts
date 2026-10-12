@@ -203,3 +203,46 @@ export function describeBuyClientError(error: BuyClientError): string {
       return 'Refusing: the order does not match what you asked for.';
   }
 }
+
+/**
+ * Fixed user copy for a failed REPORT (`POST /api/panta/buy/submit`), keyed by
+ * our own route's status. Never the response body.
+ *
+ * Report needs its own copy because the shared prepare copy is actively wrong
+ * here. `describeBuyClientError`/prepare copy talks about preparing an order, and
+ * a 400 is rendered elsewhere as "that order isn't valid. Check the amount and
+ * try again." — but by the time this runs the wallet has ALREADY SUBMITTED the
+ * transaction, so the amount was never the problem and the order may already
+ * have moved money.
+ *
+ * The single most important property (Phase 3: false reassurance after money
+ * moved): no branch may claim the order did not happen. Every message here
+ * describes an order that is on-chain, and the action it gives is to check your
+ * own positions — never to buy again as if nothing had occurred.
+ *
+ *   - a transient failure ("not recorded yet") says so, and says that reporting
+ *     again re-sends the same order;
+ *   - a 409 (our route maps the upstream stale-quote refusal QUOTE_EXPIRED to
+ *     409, and a 409 is also how a finished session would arrive) is TERMINAL:
+ *     retrying cannot change it, so it says Panta refused and sends the user to
+ *     their positions.
+ *
+ * Retrying is safe by construction: the report is keyed by the wallet's
+ * transaction signature, which is idempotent upstream, so a re-send cannot place
+ * a second order.
+ */
+export function describeBuyReportError(status: number): string {
+  // 401/403 is OUR session guard: an upstream auth failure is mapped to 502
+  // before it can reach here, so this one really is about the user's session.
+  if (status === 401 || status === 403) return 'Sign in to continue.';
+  if (status === 429) return 'Too many requests — wait a moment and try again.';
+  // The order is on-chain; Panta looks at the chain, not at this request.
+  // Reporting again is safe and is the only action that can help.
+  if (status === 409) {
+    return 'Your order was submitted, but Panta refused to record it — the quote it was built from had expired. Check your positions before buying again.';
+  }
+  // Everything else (400, 404, 502, 503, 504, and any unexpected status) is an
+  // UNCONFIRMED report about a submitted order. Saying "nothing happened" here
+  // would be the dangerous lie: the transaction is on-chain either way.
+  return "Your order was submitted, but Panta hasn't recorded it yet. Check your positions before buying again.";
+}
