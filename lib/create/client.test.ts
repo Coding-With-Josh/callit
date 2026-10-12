@@ -141,7 +141,7 @@ describe('describeSourceCheckError', () => {
       'Source checking could not be reached.',
     );
     expect(describeSourceCheckError(401)).toBe(
-      'Sign in again to check sources.',
+      'Connect your wallet to check sources.',
     );
   });
 });

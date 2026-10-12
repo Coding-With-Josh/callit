@@ -275,6 +275,24 @@ const CoverPreview = ({ question }: { question: string }) => {
 export const CreateWizard = () => {
   // The live adapter set: our own proxy routes + the session wallet's signer.
   const adapters = useCreateAdapters();
+  /**
+   * Phase 1 (complete mediation): the source check is a server-side fetch behind
+   * the session guard — an anonymous version would be a free SSRF probe — so the
+   * draft step needs its own login affordance.
+   *
+   * It had none. The only connect control lived on step 5 (the sign step), while
+   * the source gate is on step 2, so a user who pasted a source before ever
+   * connecting got a 401 from the guard and dead-ended on "Sign in again to check
+   * sources." with nothing to click. No session can be reused here either: the
+   * session is minted only once a Privy identity exists (the header wallet pill
+   * mints on connect), and there is no identity yet.
+   */
+  const {
+    ready: privyReady,
+    authenticated,
+    unavailable: privyUnavailable,
+    login,
+  } = usePrivyGate();
   const [claim, setClaim] = useState("");
   const [raw, setRaw] = useState<RawDraft | null>(null);
   const [lifecycle, setLifecycle] = useState<CreateLifecycle | null>(null);
@@ -809,7 +827,7 @@ export const CreateWizard = () => {
                           </button>
                         </div>
                         <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-1">
-                          {check?.ok && check.confidence !== "unconfirmed" ? (
+                          {check?.ok && check.confidence !== "unconfirmed" && (
                             <span
                               className="inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 font-mono text-[10px] font-medium text-emerald-700 ring-1 ring-emerald-200"
                               title={`Verified ${formatAsOf(
@@ -818,7 +836,8 @@ export const CreateWizard = () => {
                             >
                               Verified source
                             </span>
-                          ) : check?.ok ? (
+                          )}
+                          {check?.ok && check.confidence === "unconfirmed" && (
                             /* Phase 3: reached, but the page itself was never
                                read — never labelled "verified". */
                             <span
@@ -828,7 +847,8 @@ export const CreateWizard = () => {
                             >
                               Couldn&apos;t auto-confirm — site blocks bots
                             </span>
-                          ) : check && !check.ok ? (
+                          )}
+                          {check && !check.ok && (
                             <span
                               role="alert"
                               className="inline-flex max-w-full items-center truncate rounded-full bg-red-50 px-2.5 py-0.5 font-mono text-[10px] font-medium text-red-700 ring-1 ring-red-200"
@@ -836,19 +856,48 @@ export const CreateWizard = () => {
                             >
                               Not verified — {check.reason ?? "check failed"}
                             </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => void onVerifySource(trimmed)}
-                              disabled={checking || trimmed === ""}
-                              className="inline-flex cursor-pointer items-center gap-1.5 font-sans text-[10px] font-bold uppercase tracking-[0.14em] text-[#2D1C00]/45 transition-colors hover:text-[#2D1C00] disabled:cursor-not-allowed disabled:opacity-40"
-                            >
-                              {checking && (
-                                <Loader2 className="size-3 animate-spin" />
-                              )}
-                              {checking ? "Checking…" : "Verify source"}
-                            </button>
                           )}
+
+                          {/* The check cannot run anonymously, so offer the login
+                              here instead of dead-ending on a 401 — and keep a
+                              retry on a failed check, so a transient auth miss
+                              never strands a URL the user cannot re-check. */}
+                          {trimmed !== "" &&
+                            (!authenticated ? (
+                              <button
+                                type="button"
+                                disabled={!privyReady || privyUnavailable}
+                                title={
+                                  privyUnavailable
+                                    ? "Wallet login is unavailable — this origin must be allowlisted in the Privy dashboard"
+                                    : undefined
+                                }
+                                onClick={() => {
+                                  if (privyReady) login();
+                                }}
+                                className="inline-flex items-center gap-1.5 font-sans text-[10px] font-bold uppercase tracking-[0.14em] text-[#2D1C00]/70 underline decoration-dotted underline-offset-2 transition-colors hover:text-[#2D1C00] disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {privyUnavailable
+                                  ? "Login unavailable"
+                                  : "Connect wallet to check"}
+                              </button>
+                            ) : !check || !check.ok ? (
+                              <button
+                                type="button"
+                                onClick={() => void onVerifySource(trimmed)}
+                                disabled={checking}
+                                className="inline-flex cursor-pointer items-center gap-1.5 font-sans text-[10px] font-bold uppercase tracking-[0.14em] text-[#2D1C00]/45 transition-colors hover:text-[#2D1C00] disabled:cursor-not-allowed disabled:opacity-40"
+                              >
+                                {checking && (
+                                  <Loader2 className="size-3 animate-spin" />
+                                )}
+                                {checking
+                                  ? "Checking…"
+                                  : check
+                                    ? "Check again"
+                                    : "Verify source"}
+                              </button>
+                            ) : null)}
                         </div>
                       </div>
                     );

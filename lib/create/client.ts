@@ -131,7 +131,10 @@ export function parseSourceVerdict(data: unknown): SourceVerification {
  */
 export function describeSourceCheckError(status: number): string {
   if (status === 0) return 'Source checking could not be reached.';
-  if (status === 401 || status === 403) return 'Sign in again to check sources.';
+  // Not "sign in again": the usual case is a draft step reached before any
+  // wallet connection (the session mint lives in the header wallet pill), and
+  // the remedy is the same either way — this points at the control next to it.
+  if (status === 401 || status === 403) return 'Connect your wallet to check sources.';
   if (status === 400) return 'That source URL could not be checked.';
   if (status === 404) return 'Source checking is not available right now.';
   if (status === 429) return 'Too many source checks — wait a moment and try again.';
