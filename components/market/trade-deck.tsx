@@ -55,6 +55,7 @@ const CTA_LABEL: Record<BuyOrderStatus, string> = {
   broadcast: "Submitting to Panta…",
   submitted: "Order placed ✓",
   reportFailed: "Report again",
+  reportRefused: "Order placed, not recorded",
 };
 
 /**
@@ -62,7 +63,8 @@ const CTA_LABEL: Record<BuyOrderStatus, string> = {
  * that is or may be ON-CHAIN, so none of them may claim the order did not
  * happen (Phase 3: false reassurance after money moved). `broadcast` and
  * `submitted` are kept apart so the copy only says Panta was told once it
- * actually was.
+ * actually was, and `reportRefused` exists so the terminal case does not offer a
+ * retry that is known to fail.
  */
 const statusNote = (status: BuyOrderStatus): string => {
   switch (status) {
@@ -72,6 +74,8 @@ const statusNote = (status: BuyOrderStatus): string => {
       return "Order placed. Your wallet submitted it and Panta has recorded it.";
     case "reportFailed":
       return "Your order was submitted on-chain, but Panta has not recorded it yet. Reporting again re-sends the same order and cannot place a second one.";
+    case "reportRefused":
+      return "Your wallet submitted the order, but Panta refused to record it — the quote it was built from had expired. The order is on-chain: check your positions before buying again. Change the amount to start a new order.";
     case "unconfirmed":
       return "We couldn't confirm whether your wallet submitted the order. Check your positions before buying again — an order may already have been placed.";
     default:
@@ -133,7 +137,10 @@ const BuyCta = ({
     buy.status === "signing" ||
     buy.status === "unconfirmed" ||
     buy.status === "broadcast" ||
-    buy.status === "submitted";
+    buy.status === "submitted" ||
+    // A refusal retrying cannot fix: offering the button again would invite a
+    // press that is known to fail while the order may already have moved money.
+    buy.status === "reportRefused";
   const disabled = busy || settled || !amountValid || !ready;
 
   return (
@@ -489,7 +496,8 @@ const BuySlip = ({
 
       {(buy.status === "broadcast" ||
         buy.status === "submitted" ||
-        buy.status === "reportFailed") &&
+        buy.status === "reportFailed" ||
+        buy.status === "reportRefused") &&
         buy.signature && (
           <p className="mt-3 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
             Submitted {formatSignatureShort(buy.signature)}

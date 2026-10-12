@@ -113,11 +113,28 @@ function txVisibilityIsTransient(error: PantaTransportError): number | null {
  * The status for a SUBMIT (buy report) transport error.
  *
  * Same visibility-lag semantics as register: the wallet has already sent the
- * transaction, so `TX_NOT_FOUND` is transient and gets the identical 503. There
- * are no buy-specific 4xx codes here — anything else falls through to the shared
- * mapping, and the client's copy for a failed report never claims the order did
- * not happen.
+ * transaction, so `TX_NOT_FOUND` is transient and gets the identical 503.
+ *
+ * `QUOTE_EXPIRED` (400) is the one buy-specific code, observed live on
+ * 2026-10-12 against `/primaryordersubmit/`: Panta refuses a report whose order
+ * was built from a quote that has since expired. That is terminal for this
+ * order — the same class as register's CREATE_EXPIRED, and NOT a complaint about
+ * the caller's fields (the body is `{orderId, signature, wallet}`, so there are no
+ * fields to complain about) — so it becomes 409 rather than a 400 the client
+ * would render as "that order isn't valid, check the amount". The amount was
+ * never the problem and the order may already be on-chain; 409 is a conflict with
+ * existing state, which is what this is.
+ *
+ * Everything else falls through to the shared mapping, and the client's copy for
+ * a failed report never claims the order did not happen.
  */
 export function submitErrorStatus(error: PantaTransportError): number {
+  if (
+    error.kind === 'http' &&
+    error.status === 400 &&
+    pantaCodeOf(error) === 'QUOTE_EXPIRED'
+  ) {
+    return 409;
+  }
   return txVisibilityIsTransient(error) ?? transportErrorStatus(error);
 }

@@ -73,7 +73,14 @@ export type BuyOrderStatus =
   /** Submitted AND recorded by Panta. Terminal for this order. */
   | 'submitted'
   /** Submitted on-chain, but Panta has not recorded it. Reportable again. */
-  | 'reportFailed';
+  | 'reportFailed'
+  /**
+   * Submitted on-chain, but Panta REFUSED to record it and retrying cannot
+   * change that (a stale quote — `QUOTE_EXPIRED`). Terminal: no retry offered,
+   * because the order may already have moved money and the copy has to send the
+   * user to their positions instead of to a button that will fail again.
+   */
+  | 'reportRefused';
 
 /** The operands the user asked to buy, once each has passed its schema. */
 interface PreparedRequest {
@@ -109,6 +116,13 @@ function requestErrorMessage(status: number): string {
 function reportErrorMessage(status: number): string {
   if (status === 401 || status === 403) return 'Sign in to continue.';
   if (status === 429) return 'Too many requests — wait a moment and try again.';
+  if (status === 409) {
+    // Terminal, and the most dangerous case to word badly: Panta refused the
+    // report itself (a stale quote — QUOTE_EXPIRED), and the ORDER IS STILL
+    // ON-CHAIN. The user is told to check their positions, not that nothing
+    // happened.
+    return 'Your order was submitted, but Panta refused to record it — the quote it was built from had expired. Check your positions before buying again.';
+  }
   return "Your order was submitted, but Panta hasn't recorded it yet. Check your positions before buying again.";
 }
 
@@ -317,8 +331,9 @@ export function useBuyOrder(): BuyOrderController {
     const reported = await reportOrder(order.orderId, sent.value.signature);
     if (!reported.ok) {
       // NOT a failure of the order, only of the report. `reportFailed` keeps the
-      // signature, offers no re-sign, and can be retried idempotently.
-      setStatus('reportFailed');
+      // signature, offers no re-sign, and can be retried idempotently; 409 is a
+      // refusal retrying cannot fix, so it becomes terminal instead.
+      setStatus(reported.status === 409 ? 'reportRefused' : 'reportFailed');
       setError(
         describeAuthedFailure(
           reported.status,
@@ -344,7 +359,10 @@ export function useBuyOrder(): BuyOrderController {
     setError(null);
     const reported = await reportOrder(order.orderId, signature);
     if (!reported.ok) {
-      setStatus('reportFailed');
+      // 409 is a refusal retrying cannot fix (our route maps the upstream
+      // QUOTE_EXPIRED to 409); anything else may be transient, so it stays
+      // retryable and keeps offering the idempotent re-report.
+      setStatus(reported.status === 409 ? 'reportRefused' : 'reportFailed');
       setError(
         describeAuthedFailure(
           reported.status,

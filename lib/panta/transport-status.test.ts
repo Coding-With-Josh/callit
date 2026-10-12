@@ -171,12 +171,20 @@ describe('submitErrorStatus (the buy report)', () => {
     expect(submitErrorStatus(known(404, 'TX_NOT_FOUND'))).toBe(503);
   });
 
-  it('does not invent buy-specific meaning for other 4xx codes', () => {
-    // Unlike register there is no "session is finished" code here, so a 400 stays
-    // a 400 and the client copy for a failed report is what keeps the user from
-    // being told the order did not happen.
+  it('turns a stale-quote refusal into a 409, not a 400', () => {
+    // Verified live (2026-10-12): POST /primaryordersubmit/ with an unknown or
+    // expired order answers 400 {"code":"QUOTE_EXPIRED"}. Forwarding that as a
+    // 400 made the client say "that order isn't valid. Check the amount and try
+    // again." — about a body whose only fields are an id and a signature, at a
+    // stage where the wallet has ALREADY submitted the order. The amount was
+    // never the problem, and the order may already be on-chain.
+    expect(submitErrorStatus(known(400, 'QUOTE_EXPIRED'))).toBe(409);
+  });
+
+  it('does not invent buy-specific meaning for unrecognised codes', () => {
     expect(submitErrorStatus(known(400, 'INVALID_MARKET_PARAMS'))).toBe(400);
-    expect(submitErrorStatus(known(400, 'CREATE_EXPIRED'))).toBe(400);
+    // A register-only code is not special here: fail closed, no guessing.
+    expect(submitErrorStatus(known(400, 'DUPLICATE_MARKET'))).toBe(400);
     const unknown: PantaTransportError = {
       kind: 'http',
       status: 404,
@@ -188,6 +196,7 @@ describe('submitErrorStatus (the buy report)', () => {
   it('never returns 401 or 403 for any report failure', () => {
     const all: readonly PantaTransportError[] = [
       known(404, 'TX_NOT_FOUND'),
+      known(400, 'QUOTE_EXPIRED'),
       known(400, 'INVALID_MARKET_PARAMS'),
       known(401, 'UNAUTHORIZED'),
       known(403, 'FORBIDDEN'),
