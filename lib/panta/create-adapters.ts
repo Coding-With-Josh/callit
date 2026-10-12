@@ -68,6 +68,12 @@ export interface PantaCreateAdapterConfig {
   /** Wallet signing hook. Returns the transaction signature. */
   readonly signCreate: (build: CreateBuild) => Promise<TxSignature>;
   /**
+   * Sign AND submit hook (the wallet signs and the network is handed the
+   * transaction in one prompt). Register requires the transaction to be
+   * visible on-chain, so a create that only signs can never become a market.
+   */
+  readonly broadcastCreate: (build: CreateBuild) => Promise<TxSignature>;
+  /**
    * Source-of-truth verifier. Defaults to the SSRF-hardened reachability
    * check (see source-verifier.ts). Injectable so callers can cap policy or
    * run offline in tests.
@@ -280,6 +286,7 @@ export function createPantaCreateAdapters(
     generateDraft: config.generateDraft,
     uploadImage: config.uploadImage,
     signCreate: config.signCreate,
+    broadcastCreate: config.broadcastCreate,
     verifySource: config.verifySource ?? createSourceVerifier(),
     now,
 

@@ -205,35 +205,39 @@ export function describeCreateClientError(status: number): string {
  * upstream, so a retry that is not needed is refused rather than duplicated.
  */
 export function describeRegisterClientError(status: number): string {
+  // EVERY message here is about a transaction that has ALREADY BEEN BROADCAST.
+  // Register only reports a transaction the network has, so no branch may claim
+  // that nothing was submitted or nothing was charged — at this point a market
+  // may exist and the fee may have moved (Phase 3: false reassurance after money
+  // moved is the failure this vocabulary exists to prevent).
+  //
   // 401/403 is OUR session guard: an upstream auth failure is mapped to 502
   // before it can reach here, so this one really is about the user's session.
   if (status === 401 || status === 403) return 'Sign in to continue.';
-  // Our perimeter refused the body, or Panta refused the submission outright
-  // (e.g. a signature that does not match). Nothing was submitted, and a failed
-  // submission does not consume the create session, so a retry is safe to offer.
+  // Our perimeter refused the body, or Panta refused the report outright (e.g. a
+  // signature that does not match). Neither undoes the on-chain transaction.
   if (status === 400) {
-    return 'The submission was refused, so nothing was submitted. You can try again.';
+    return 'Panta refused to register this create. Your transaction may still be on-chain — check your markets before trying again.';
   }
   // The create session is finished: gone, or already consumed by an earlier
   // successful register. We cannot tell which, so we must not assert that
   // nothing was charged — a market may exist and the fee may have moved.
   if (status === 409) {
-    return 'This create session was already used or has expired. If you signed it, check your markets first — a market may have been created.';
+    return 'This create session was already used or has expired. Check your markets first — a market may have been created.';
   }
   if (status === 429) return 'Too many requests — wait a moment and try again.';
-  // 410: Panta holds no transaction for this create session — it was never
-  // built, or the built blockhash expired (the live hint is ~60s). It cannot
-  // have submitted something it does not hold, so nothing was charged; but
-  // retrying the SAME signature would fail identically, because the transaction
-  // itself is gone. The copy has to say "rebuild", not "try again".
-  if (status === 410) {
-    return 'Panta no longer has this transaction, so nothing was submitted. Go back to the draft and build it again.';
+  // 503: Panta could not see the submitted transaction in time (it indexes from
+  // the chain), so the REGISTRATION is unconfirmed, not failed. The submission
+  // itself is not in question, and repeating it would create a second market, so
+  // the copy sends the user to their own record instead of back to the button.
+  if (status === 503) {
+    return "Your transaction was submitted, but Panta hasn't registered it yet. Check your markets in a moment — don't submit it again.";
   }
   // 502 (upstream failure, network failure, or Panta rejecting our key) and 504
-  // (timeout) are both UNCONFIRMED: the request may have been accepted before
-  // the connection broke. Never reassure; send the user to their own record.
-  if (status === 502 || status === 503 || status === 504 || status === 0) {
-    return "We couldn't confirm the submission. Check your markets before trying again — a market may have been created.";
+  // (timeout) are both UNCONFIRMED: the report may have been accepted before the
+  // connection broke. Never reassure; send the user to their own record.
+  if (status === 502 || status === 504 || status === 0) {
+    return "We couldn't confirm the registration. Your transaction may be on-chain — check your markets before trying again.";
   }
-  return 'The market could not be submitted.';
+  return 'The market could not be registered.';
 }

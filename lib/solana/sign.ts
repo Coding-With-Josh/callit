@@ -25,6 +25,7 @@
 import {
   assertIsFullySignedTransaction,
   getBase64Encoder,
+  getBase58Decoder,
   getCompiledTransactionMessageDecoder,
   getSignatureFromTransaction,
   getTransactionDecoder,
@@ -36,7 +37,11 @@ import {
  */
 export class SolanaSignError extends Error {
   constructor(
-    readonly kind: 'decode-failed' | 'not-single-signer' | 'not-fully-signed',
+    readonly kind:
+      | 'decode-failed'
+      | 'not-single-signer'
+      | 'not-fully-signed'
+      | 'invalid-signature',
     message: string,
     readonly numRequiredSignatures?: number,
   ) {
@@ -123,4 +128,27 @@ export function extractSignatureFromSigned(bytes: Uint8Array): string {
     throw new SolanaSignError('not-fully-signed', 'wallet returned a transaction that is not fully signed');
   }
   return getSignatureFromTransaction(tx);
+}
+
+/**
+ * Encode the raw signature bytes a wallet returns from
+ * `solana:signAndSendTransaction` into the base58 form Panta's `signature` field
+ * and our `txSignature` schema use.
+ *
+ * Why this exists: the sign-and-send transport returns the signature but NOT the
+ * signed transaction, so `extractSignatureFromSigned` cannot be used. The two
+ * paths therefore have different proofs, and this one is weaker: it can only
+ * check the shape of what came back, not that a transaction was fully signed. It
+ * compensates by being strict about the shape — an ed25519 signature is exactly
+ * 64 bytes, so anything else is refused rather than encoded (Phase 2: a truncated
+ * or empty result must never be treated as a successful submission).
+ */
+export function signatureFromBytes(bytes: Uint8Array): string {
+  if (!(bytes instanceof Uint8Array) || bytes.length !== 64) {
+    throw new SolanaSignError(
+      'invalid-signature',
+      `wallet returned a ${bytes instanceof Uint8Array ? bytes.length : 'non-byte'} signature, expected 64`,
+    );
+  }
+  return getBase58Decoder().decode(bytes);
 }

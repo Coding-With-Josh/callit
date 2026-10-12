@@ -48,6 +48,18 @@ import {
 const DAY_SECONDS = 86_400;
 
 /**
+ * Register retry schedule (bounded). Panta's register REPORTS a transaction that
+ * has already been broadcast, and it indexes from the chain, so a report sent
+ * immediately after the send can legitimately answer "not visible yet" until
+ * Panta catches up. Five attempts over ~8s, then the user is told the truth
+ * (submitted, not yet registered) rather than being invited to submit again.
+ */
+const REGISTER_RETRY_DELAYS_MS = [750, 1_500, 3_000, 3_000] as const;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
  * The public image URL sent with the create quote while no image host is wired.
  *
  * The wire contract requires a public http(s) URL and rejects data URLs, so the
@@ -85,7 +97,7 @@ function nowSeconds(): UnixSeconds {
 }
 
 export function useCreateAdapters(): CreateAdapters {
-  const { sign } = useSolanaSigner();
+  const { sign, signAndSend } = useSolanaSigner();
 
   // Memoised so `adapters` is a stable identity across renders: the wizard reads
   // `adapters.now()` while rendering and keys its effects off this object, so a
@@ -241,10 +253,10 @@ export function useCreateAdapters(): CreateAdapters {
       },
 
       /**
-       * The only place a wallet prompt happens. The signer gate refuses an
-       * expired/mismatched/extra-signer transaction BEFORE the prompt, and its
-       * failures are mapped to fixed copy — the wallet's own message is never
-       * surfaced (Phase 2).
+       * The sign-only hook. Kept so the `signed` stage stays expressible, but NO
+       * step in this app registers from it: Panta's register needs the
+       * transaction visible on-chain, and a signature alone is not on-chain.
+       * The wallet prompt happens in `broadcastCreate` below.
        */
       signCreate: async (build) => {
         const out = await sign(build.transaction);
@@ -257,23 +269,49 @@ export function useCreateAdapters(): CreateAdapters {
       },
 
       /**
-       * signed -> registered. THE money step: this is the only call in the app
-       * that can make a market exist on-chain and move real funds, because Panta
-       * submits the transaction the user just signed.
+       * built -> broadcast. THE submission: the wallet signs Panta's transaction
+       * and hands it to the network in one prompt, and the signature that comes
+       * back names a transaction that is now (or is being) on-chain.
+       *
+       * Why this step has to exist: register does not submit anything — it
+       * REPORTS a transaction Panta must already be able to see. Without a
+       * broadcast, every register returned `TX_NOT_FOUND`, because Panta was
+       * being handed a signature for a transaction that never left the browser.
+       *
+       * Phase 3 (double spend): the signer gate refuses an undecodable,
+       * multi-signer, or wrong-wallet transaction before the prompt, and the only
+       * thing returned is the signature — the signed bytes are never held here,
+       * so there is no path that signs without sending.
+       */
+      broadcastCreate: async (build) => {
+        const out = await signAndSend(build.transaction);
+        if (!out.ok) throw new Error(describeSignRequestError(out.error));
+        try {
+          return txSignature(out.value.signature);
+        } catch {
+          throw new Error('Your wallet returned a signature we could not read.');
+        }
+      },
+
+      /**
+       * broadcast -> registered. NOT the money step — the money moved when the
+       * wallet submitted. This step REPORTS the submitted transaction so Panta
+       * creates the market record for it.
        *
        * Three properties are deliberate:
-       *  - It is a SEPARATE, explicit action. Signing is not submitting; the user
-       *    confirms the submission on its own button, with the fee and the
-       *    irreversibility warning on that button (see the wizard's sign step).
-       *  - The wallet is NOT sent. Register's wire contract is exactly
-       *    `{ createId, signature }`, and the `createId` was already bound to the
-       *    session wallet by the quote that produced it. The signature is the
-       *    authority: only the transaction's own fee payer can produce one, so a
-       *    caller cannot submit a market for a wallet they do not hold.
-       *  - A retry cannot double-charge. The upstream `createId` is single-use
-       *    ("not found or already consumed"), so a duplicate submit is refused —
-       *    which is also why the copy never promises a retry is free when the
-       *    outcome is genuinely unknown (see describeRegisterClientError).
+       *  - It runs only after a confirmed broadcast. Registering from the
+       *    sign-only stage is illegal in the transition table, because Panta
+       *    cannot register a transaction it cannot see on-chain (the bug this
+       *    pipeline was just fixed for).
+       *  - It RETRIES the same signature a bounded number of times on 503. Panta
+       *    indexes from the chain, so a register sent immediately after the send
+       *    legitimately answers `TX_NOT_FOUND` — mapped to 503, a "not visible
+       *    yet" state, NOT "nothing happened" — until it catches up. A retry
+       *    re-sends the same report, so it can neither spend nor create twice;
+       *    and Panta refuses an already-consumed create session outright.
+       *  - It is NOT retried on 409 (the session is finished — a market may
+       *    already exist, and retrying cannot tell the user anything new) or on
+       *    400 (the body was refused).
        *
        * Phase 2 (no internals leak / no fabricated success): the response is
        * parsed through a strict schema, never displayed, and a failure is fixed
@@ -281,10 +319,17 @@ export function useCreateAdapters(): CreateAdapters {
        * with no usable market id rather than letting the UI announce a market.
        */
       register: async (quote, signature) => {
-        const res = await authedJson('/api/panta/create/register', {
-          method: 'POST',
-          body: { createId: quote.createId, signature },
-        });
+        const submit = () =>
+          authedJson('/api/panta/create/register', {
+            method: 'POST',
+            body: { createId: quote.createId, signature },
+          });
+        let res = await submit();
+        for (const delay of REGISTER_RETRY_DELAYS_MS) {
+          if (res.ok || res.status !== 503) break;
+          await sleep(delay);
+          res = await submit();
+        }
         if (!res.ok) {
           // A register failure has its own vocabulary: the create copy would
           // tell the user to go and edit a draft that is already signed.
@@ -299,6 +344,6 @@ export function useCreateAdapters(): CreateAdapters {
         return parseCreateRegister(res.data);
       },
     }),
-    [sign],
+    [sign, signAndSend],
   );
 }

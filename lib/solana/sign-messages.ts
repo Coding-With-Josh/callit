@@ -27,6 +27,12 @@ export function describeSignRequestError(error: SignRequestError): string {
     case 'wallet-rejected':
       // Fixed copy: the raw wallet message is intentionally not surfaced.
       return 'Your wallet did not sign the transaction.';
+    case 'send-failed':
+      // Phase 2/3: this failure is AMBIGUOUS. The wallet may have signed and the
+      // network may have accepted the transaction before the error surfaced, so
+      // the copy must not promise that nothing happened. It points the user at
+      // their own record instead, which is the only honest check available.
+      return "We couldn't confirm whether your wallet submitted the transaction. Check your markets before trying again — a market may have been created.";
   }
   // The union is exhaustive; this is unreachable but keeps the return total.
   return 'Signing failed.';

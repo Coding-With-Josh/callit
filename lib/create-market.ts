@@ -151,7 +151,18 @@ export interface CreateAdapters {
   readonly buildCreate: (quote: CreateQuote) => Promise<CreateBuild>;
   /** Wallet signing hook. Returns the transaction signature. */
   readonly signCreate: (build: CreateBuild) => Promise<TxSignature>;
-  /** Register the signed create; returns the on-chain market id. */
+  /**
+   * Sign AND submit. THE wallet action: the wallet signs Panta's transaction and
+   * hands it to the network in one prompt, returning its signature.
+   *
+   * This exists because a signature that is never submitted is a dead end —
+   * Panta's register step needs the transaction visible on-chain, so a
+   * sign-only create can never become a market (observed live as
+   * `TX_NOT_FOUND`). Kept separate from `signCreate` so the sign-only path
+   * remains expressible, but no step may register from it.
+   */
+  readonly broadcastCreate: (build: CreateBuild) => Promise<TxSignature>;
+  /** Register the broadcast create; returns the on-chain market id. */
   readonly register: (
     quote: CreateQuote,
     signature: TxSignature,
@@ -355,7 +366,8 @@ export async function buildStep(
   });
 }
 
-/** built -> signed. The wallet UI hooks in here via the adapter. */
+/** signed -> registered is no longer legal: a signature alone is not a market.
+ *  Kept as a step so the sign-only stage is still expressible and testable. */
 export async function signStep(
   lifecycle: CreateLifecycle,
   adapters: CreateAdapters,
@@ -386,14 +398,64 @@ export async function signStep(
   });
 }
 
-/** signed -> registered. Returns the on-chain market id. */
+/**
+ * built -> broadcast (or signed -> broadcast). THE money step: the wallet signs
+ * and the network is handed the transaction. From this point the market may
+ * already exist and the fee may already have moved, which is why this stage has
+ * no path back to `built`/`signed` (Phase 3: a re-sign here would spend twice).
+ *
+ * The timestamp is taken AFTER the wallet returns, so `broadcastAt` never
+ * precedes the send. `signedAt` is the same instant on the sign-and-send path
+ * because the wallet performs both in one prompt.
+ */
+export async function broadcastStep(
+  lifecycle: CreateLifecycle,
+  adapters: CreateAdapters,
+): Promise<Result<CreateLifecycle, CreateMarketError>> {
+  const blocked = guardTransition(lifecycle, "broadcast");
+  if (blocked) return err(blocked);
+  if (lifecycle.status !== "built" && lifecycle.status !== "signed") {
+    return err({
+      kind: "invalid_transition",
+      from: lifecycle.status,
+      to: "broadcast",
+    });
+  }
+  let signature: TxSignature;
+  try {
+    signature = await adapters.broadcastCreate(lifecycle.build);
+  } catch (error) {
+    return err({ kind: "adapter", message: adapterMessage(error) });
+  }
+  const at = adapters.now();
+  return ok({
+    status: "broadcast",
+    draft: lifecycle.draft,
+    imageUrl: lifecycle.imageUrl,
+    quote: lifecycle.quote,
+    build: lifecycle.build,
+    signature,
+    signedAt: at,
+    broadcastAt: at,
+  });
+}
+
+/**
+ * broadcast -> registered. Returns the on-chain market id.
+ *
+ * Reached ONLY from `broadcast`: register is a REPORT of a transaction that is
+ * already on the network, so this step can neither spend nor create anything —
+ * a retry re-sends the same report, and Panta refuses an already-consumed
+ * create session rather than creating a second market (Phase 3: duplicate
+ * registration is idempotent).
+ */
 export async function registerStep(
   lifecycle: CreateLifecycle,
   adapters: CreateAdapters,
 ): Promise<Result<CreateLifecycle, CreateMarketError>> {
   const blocked = guardTransition(lifecycle, "registered");
   if (blocked) return err(blocked);
-  if (lifecycle.status !== "signed") {
+  if (lifecycle.status !== "broadcast") {
     return err({
       kind: "invalid_transition",
       from: lifecycle.status,
@@ -657,6 +719,11 @@ export const fixtureCreateAdapters: CreateAdapters = {
   }),
 
   signCreate: async () => txSignature("1".repeat(88)),
+
+  // Same signature as `signCreate` on purpose: an ed25519 signature is
+  // deterministic over the same bytes, so signing and sign-and-send cannot
+  // produce different signatures for the same transaction.
+  broadcastCreate: async () => txSignature("1".repeat(88)),
 
   register: async () => marketId("fixture-registered-1"),
 

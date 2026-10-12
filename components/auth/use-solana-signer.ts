@@ -42,6 +42,7 @@ import {
   decodeUnsignedTransactionB64,
   extractSignatureFromSigned,
   getSingleRequiredSigner,
+  signatureFromBytes,
   SolanaSignError,
 } from '@/lib/solana/sign';
 
@@ -51,11 +52,29 @@ export type SignRequestError =
   | { readonly kind: 'decode-failed' }
   | { readonly kind: 'not-single-signer'; readonly numRequiredSignatures: number }
   | { readonly kind: 'signer-mismatch'; readonly txSigner: string; readonly expected: string }
-  | { readonly kind: 'wallet-rejected'; readonly message: string };
+  | { readonly kind: 'wallet-rejected'; readonly message: string }
+  /**
+   * The wallet could not be CONFIRMED to have submitted. Deliberately separate
+   * from `wallet-rejected` (where nothing was signed): a sign-and-send failure is
+   * ambiguous — the wallet may have signed and the network may have accepted the
+   * transaction before the error surfaced — so its copy must never claim nothing
+   * happened (Phase 3: false reassurance after money moved).
+   */
+  | { readonly kind: 'send-failed'; readonly message: string };
 
 export interface SignedTransaction {
   readonly signedTransaction: Uint8Array;
   /** base58 ed25519 signature — parse with `txSignatureSchema` where needed. */
+  readonly signature: string;
+  readonly wallet: WalletAddress;
+}
+
+export interface SubmittedTransaction {
+  /**
+   * base58 ed25519 signature of a transaction the wallet has handed to the
+   * network. There is no signed payload on this path: the wallet-standard
+   * sign-and-send feature returns only the signature.
+   */
   readonly signature: string;
   readonly wallet: WalletAddress;
 }
@@ -67,9 +86,24 @@ export interface SolanaSigner {
   readonly connectedAddress: string | null;
   /** True when authenticated and a matching connected wallet is present. */
   readonly ready: boolean;
+  /** Sign only. Produces a signature; submits nothing. */
   readonly sign: (
     transactionB64: string,
   ) => Promise<Result<SignedTransaction, SignRequestError>>;
+  /**
+   * Sign AND submit, through the wallet-standard `solana:signAndSendTransaction`
+   * feature. This is the app's single way to put a transaction on-chain.
+   *
+   * The gates are identical to `sign` and run BEFORE the wallet is prompted: a
+   * transaction that is undecodable, has more than one required signer, or is not
+   * owned by the session identity wallet is refused here and never reaches the
+   * wallet. Because the feature returns no signed payload, the proof of success
+   * is weaker — only a well-formed 64-byte signature — which is why the result
+   * shape is a separate type from `SignedTransaction`.
+   */
+  readonly signAndSend: (
+    transactionB64: string,
+  ) => Promise<Result<SubmittedTransaction, SignRequestError>>;
 }
 
 type ConnectedAccount = NonNullable<SolanaStandardWallet['accounts'][number]>;
@@ -97,10 +131,27 @@ export function useSolanaSigner(): SolanaSigner {
     return null;
   }, [standardWallets, identityWallet]);
 
-  const sign = useCallback(
-    async (
+  /**
+   * The shared gate for BOTH wallet actions (Phase 1: complete mediation, B1).
+   *
+   * Every check that must happen before the wallet sees bytes lives here, so a
+   * future action cannot reuse the transport while skipping the gate. It is
+   * total: every refusal is a `SignRequestError`, never a throw.
+   */
+  const gate = useCallback(
+    (
       transactionB64: string,
-    ): Promise<Result<SignedTransaction, SignRequestError>> => {
+    ): Result<
+      {
+        readonly bytes: Uint8Array;
+        readonly wallet: WalletAddress;
+        readonly connected: {
+          readonly wallet: SolanaStandardWallet;
+          readonly account: ConnectedAccount;
+        };
+      },
+      SignRequestError
+    > => {
       if (!standardWalletsReady || !ready || !authenticated) {
         return err({ kind: 'unauthenticated' });
       }
@@ -142,9 +193,22 @@ export function useSolanaSigner(): SolanaSigner {
         });
       }
 
+      return ok({ bytes, wallet: identityWallet, connected });
+    },
+    [ready, standardWalletsReady, authenticated, identityWallet, connected],
+  );
+
+  const sign = useCallback(
+    async (
+      transactionB64: string,
+    ): Promise<Result<SignedTransaction, SignRequestError>> => {
+      const gated = gate(transactionB64);
+      if (!gated.ok) return gated;
+      const { bytes, wallet, connected: target } = gated.value;
+
       // 4. Prompt the user's wallet via its wallet-standard feature.
       //    Chain follows the configured cluster (mainnet by default).
-      const signTransactionFeature = connected.wallet.features['solana:signTransaction'];
+      const signTransactionFeature = target.wallet.features['solana:signTransaction'];
       if (!signTransactionFeature) {
         return err({
           kind: 'wallet-rejected',
@@ -155,7 +219,7 @@ export function useSolanaSigner(): SolanaSigner {
       let signedTransaction: Uint8Array;
       try {
         const [out] = await signTransactionFeature.signTransaction({
-          account: connected.account,
+          account: target.account,
           transaction: bytes,
           chain: SOLANA_CHAIN,
         });
@@ -179,9 +243,73 @@ export function useSolanaSigner(): SolanaSigner {
         });
       }
 
-      return ok({ signedTransaction, signature, wallet: identityWallet });
+      return ok({ signedTransaction, signature, wallet });
     },
-    [ready, standardWalletsReady, authenticated, identityWallet, connected],
+    [gate],
+  );
+
+  /**
+   * Sign AND submit — the app's single way to put a transaction on-chain.
+   *
+   * Same gate as `sign`, so nothing about the send path relaxes the checks that
+   * happen before the wallet is prompted. What differs is the PROOF: the
+   * wallet-standard feature returns only a signature, so the only thing that can
+   * be verified afterwards is its shape (64 bytes), never that a transaction was
+   * fully signed. That is why a failure here is reported as `send-failed`
+   * (ambiguous) rather than `wallet-rejected` (nothing happened).
+   */
+  const signAndSend = useCallback(
+    async (
+      transactionB64: string,
+    ): Promise<Result<SubmittedTransaction, SignRequestError>> => {
+      const gated = gate(transactionB64);
+      if (!gated.ok) return gated;
+      const { bytes, wallet, connected: target } = gated.value;
+
+      const feature = target.wallet.features['solana:signAndSendTransaction'];
+      if (!feature) {
+        // Phase 2: there is deliberately NO sign-only fallback here. A signature
+        // that is never handed to the network is exactly the orphaned-signature
+        // bug this path exists to remove, so a wallet that cannot send must not
+        // be used to sign either.
+        return err({
+          kind: 'wallet-rejected',
+          message: 'connected wallet cannot submit transactions',
+        });
+      }
+
+      let raw: Uint8Array;
+      try {
+        const [out] = await feature.signAndSendTransaction({
+          account: target.account,
+          transaction: bytes,
+          chain: SOLANA_CHAIN,
+        });
+        raw = out.signature;
+      } catch (e) {
+        // Phase 3 (false reassurance after money moved): an error thrown out of
+        // sign-and-send cannot be told apart from "signed, then the RPC call
+        // failed". The caller must treat the outcome as UNCONFIRMED.
+        return err({
+          kind: 'send-failed',
+          message: e instanceof Error ? e.message : 'unknown wallet error',
+        });
+      }
+
+      let signature: string;
+      try {
+        signature = signatureFromBytes(raw);
+      } catch (e) {
+        return err({
+          kind: 'send-failed',
+          message:
+            e instanceof Error ? e.message : 'wallet returned an unusable signature',
+        });
+      }
+
+      return ok({ signature, wallet });
+    },
+    [gate],
   );
 
   return {
@@ -189,5 +317,6 @@ export function useSolanaSigner(): SolanaSigner {
     connectedAddress: connected?.account.address ?? null,
     ready: ready && standardWalletsReady && authenticated && !!identityWallet && !!connected,
     sign,
+    signAndSend,
   };
 }

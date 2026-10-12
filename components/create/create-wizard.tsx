@@ -61,14 +61,18 @@ import {
  * which re-authenticate the session and bind the wallet server-side), and the
  * signature the user produces is over Panta's own create transaction.
  *
- * It is NOT broadcast by that signature. Registering the market — the one
- * irreversible, money-moving step, where Panta submits the signed transaction —
- * is a SECOND, explicitly separate action behind its own button (see `onCreate`
- * below), so that signing a transaction never silently submits it. The create
- * therefore stops at `signed` until the user asks for it to be submitted.
+ * THAT SIGNATURE IS WHAT SUBMITS IT. The wallet is asked to sign AND send in one
+ * prompt (wallet-standard `solana:signAndSendTransaction`), because Panta's
+ * register step only REPORTS a transaction it can already see on-chain — a
+ * signature that is never handed to the network can never become a market. That
+ * was the live failure this flow used to hit: every register answered
+ * `TX_NOT_FOUND`, because nothing had ever been broadcast. The spend therefore
+ * happens at the moment the user approves the transaction in their wallet (with
+ * the fee on the button that opens that prompt), and the pipeline records
+ * `broadcast` — on-chain, possibly charged — BEFORE it reports anything to Panta.
  */
 
-const STEPS = ["Claim", "Draft", "Resolve", "Quote", "Sign", "Create"] as const;
+const STEPS = ["Claim", "Draft", "Resolve", "Quote", "Submit", "Create"] as const;
 
 type StageState = "active" | "done" | "locked";
 type WizardStatus = "intake" | CreateLifecycle["status"];
@@ -102,7 +106,7 @@ const checksRecord = (
   Object.fromEntries(checks.map((check) => [check.url, check]));
 
 /**
- * Step 05 — the real signing step (Phase 1: complete mediation).
+ * Step 05 — the real submit step (Phase 1: complete mediation).
  *
  * Connecting a wallet here is an *affordance* only: it grants no server
  * privilege, and this island is never the authority. The routes that quote and
@@ -111,33 +115,30 @@ const checksRecord = (
  * transaction's ONLY required signer is the session identity wallet before the
  * wallet is prompted.
  *
- * Phase 3 (stale build): "prepare" and "sign" are two deliberate actions. The
+ * Phase 3 (stale build): "prepare" and "submit" are two deliberate actions. The
  * build's blockhash window is re-checked by the pipeline's `buildStep` before the
  * wallet is ever prompted, so a user who lingered on the review step cannot sign
  * an expired transaction.
  *
- * The transaction signed here is Panta's own create transaction. Signing it
- * submits nothing: the signature is kept and handed over by a separate, explicit
- * action (the "Create market" button on the signed phase below), which is the
- * only thing in this app that can move money.
+ * The button below is the ONLY thing in this app that spends: the wallet signs
+ * Panta's create transaction AND hands it to the network in one prompt
+ * (`buildStep` → `broadcastStep`). The fee is on the button because the wallet can
+ * only be asked once, and this is the moment the user authorises it.
  */
 const SignStep = ({
   phase,
   busy,
-  signature,
   fee,
   onBuild,
-  onSign,
-  onCreate,
+  onSubmit,
 }: {
-  phase: "quoted" | "built" | "signed";
+  phase: "quoted" | "built";
   busy: boolean;
-  signature: string | null;
   /** The quoted creation fee, as domain copy. Shown on the submit button. */
   fee: string;
   onBuild: () => void;
-  onSign: () => void;
-  onCreate: () => void;
+  /** Sign AND send — the one action here that can spend. */
+  onSubmit: () => void;
 }) => {
   const { ready, authenticated, unavailable, login } = usePrivyGate();
   const { ready: signerReady } = useSolanaSigner();
@@ -160,33 +161,6 @@ const SignStep = ({
       >
         {unavailable ? "Login unavailable" : "Connect to sign"}
       </button>
-    );
-  }
-
-  if (phase === "signed") {
-    return (
-      <div className="flex flex-col gap-3">
-        <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
-          Signed {signature ? formatSignatureShort(signature) : ""} — not
-          submitted yet.
-        </p>
-        <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
-          This is the last step, and the only one that cannot be undone.
-          Submitting hands your signature to Panta, which puts the market
-          on-chain and moves <span className="font-semibold">{fee} USDC</span> from
-          your wallet. Signing above did not spend anything — this does.
-        </p>
-        <button
-          type="button"
-          disabled={busy}
-          aria-busy={busy}
-          onClick={onCreate}
-          className="flex w-full items-center justify-center gap-2 rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
-        >
-          {busy && <Loader2 className="size-4 animate-spin" />}
-          {busy ? "Creating…" : `Create market — ${fee} USDC`}
-        </button>
-      </div>
     );
   }
 
@@ -216,14 +190,16 @@ const SignStep = ({
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
-        Your wallet signs Panta&apos;s create transaction. Signing does not
-        submit it — you confirm the submission as a separate final step.
+        One prompt, and it is the one that spends: your wallet signs Panta&apos;s
+        create transaction and submits it. That submission is what puts the market
+        on-chain and moves{" "}
+        <span className="font-semibold">{fee} USDC</span> from your wallet.
       </p>
       <button
         type="button"
         disabled={disabled}
         aria-busy={busy}
-        onClick={onSign}
+        onClick={onSubmit}
         className={`flex w-full items-center justify-center gap-2 rounded-full py-3 text-sm font-semibold tracking-tight transition-transform duration-150 motion-reduce:transition-none ${
           disabled
             ? "cursor-not-allowed bg-[#2D1C00]/15 text-[#2D1C00]/50"
@@ -231,7 +207,7 @@ const SignStep = ({
         }`}
       >
         {busy && <Loader2 className="size-4 animate-spin" />}
-        {busy ? "Confirm in your wallet…" : "Sign with wallet"}
+        {busy ? "Confirm in your wallet…" : `Create market — ${fee} USDC`}
       </button>
 
       {!signerReady && (

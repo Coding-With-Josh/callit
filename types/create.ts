@@ -43,6 +43,7 @@ export type CreateStage =
   | 'quoted'
   | 'built'
   | 'signed'
+  | 'broadcast'
   | 'registered'
   | 'create_expired'
   | 'duplicate_market'
@@ -57,6 +58,7 @@ export type CreateLifecycle =
   | { readonly status: 'quoted'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote }
   | { readonly status: 'built'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly build: CreateBuild }
   | { readonly status: 'signed'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly build: CreateBuild; readonly signature: TxSignature; readonly signedAt: UnixSeconds }
+  | { readonly status: 'broadcast'; readonly draft: ResolvableDraft; readonly imageUrl: string; readonly quote: CreateQuote; readonly build: CreateBuild; readonly signature: TxSignature; readonly signedAt: UnixSeconds; readonly broadcastAt: UnixSeconds }
   | { readonly status: 'registered'; readonly draft: ResolvableDraft; readonly quote: CreateQuote; readonly marketId: MarketId; readonly registeredAt: UnixSeconds }
   | { readonly status: 'create_expired'; readonly at: UnixSeconds }
   | { readonly status: 'duplicate_market'; readonly question: string; readonly at: UnixSeconds }
@@ -69,8 +71,18 @@ export const CREATE_TRANSITIONS: Readonly<Record<CreateStage, readonly CreateSta
   resolvable: ['imaged', 'quoted', 'create_expired', 'failed'],
   imaged: ['quoted', 'create_expired', 'failed'],
   quoted: ['built', 'create_expired', 'duplicate_market', 'failed'],
-  built: ['signed', 'create_expired', 'failed'],
-  signed: ['registered', 'duplicate_market', 'failed'],
+  built: ['broadcast', 'signed', 'create_expired', 'failed'],
+  // `signed` is the sign-ONLY path: held for the transport that signs without
+  // sending. A signature alone is never sufficient to register, so the only way
+  // on from here is to actually put the transaction on-chain.
+  signed: ['broadcast', 'duplicate_market', 'failed'],
+  // `broadcast` is the state that MATTERS for honesty: the transaction is (or is
+  // being handed to) the network, so the market may already exist and the fee
+  // may already have moved. There is deliberately NO edge back to `built` or
+  // `signed` — re-signing from here is how a user would be charged twice (Phase 3:
+  // double spend by re-sign). Registering is a REPORT of an already-submitted
+  // transaction, so it is the only forward step and it is safe to retry.
+  broadcast: ['registered', 'failed'],
   registered: [],
   create_expired: ['resolvable'],
   duplicate_market: ['resolvable'],
