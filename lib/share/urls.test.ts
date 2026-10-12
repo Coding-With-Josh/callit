@@ -4,7 +4,9 @@ import { absoluteUrl, SITE_URL } from "@/lib/seo/site";
 import {
   blinkUrl,
   isShareableMarketId,
+  PANTA_ORIGIN,
   marketUrl,
+  pantaMarketUrl,
   SHARE_ID_PATTERN,
   SHARE_TEXT_MAX,
   shareText,
@@ -55,8 +57,37 @@ describe("marketUrl / blinkUrl", () => {
   });
 });
 
-describe("shareText", () => {
-  it("strips control characters (newline/param smuggling vector)", () => {
+describe("pantaMarketUrl — the link-out target", () => {
+  it("points at the market's page on Panta, not the site root", () => {
+    expect(pantaMarketUrl(ID)).toBe(`${PANTA_ORIGIN}/market/${ID}`);
+    // A real id from the live catalog (the shape production actually returns).
+    const live = "89wXZbH7b5JXbfpWAujggNhvGWjtvrSXnbFt8Z2QS5Ec";
+    expect(pantaMarketUrl(live)).toBe(`${PANTA_ORIGIN}/market/${live}`);
+  });
+
+  it("is pinned to the Panta origin — the destination host cannot be supplied", () => {
+    expect(pantaMarketUrl(ID)!.startsWith(`${PANTA_ORIGIN}/market/`)).toBe(true);
+  });
+
+  it("returns null for anything outside the id scope (Phase 3: href injection)", () => {
+    // Each of these would escape a naive interpolation into href.
+    expect(pantaMarketUrl("../../evil")).toBeNull(); // path traversal (`.` rejected)
+    expect(pantaMarketUrl("//evil.example")).toBeNull(); // protocol-relative (`.`/`/`)
+    expect(pantaMarketUrl("javascript:alert(1)")).toBeNull(); // scheme (`:` rejected)
+    expect(pantaMarketUrl("https://evil.example/x")).toBeNull();
+    expect(pantaMarketUrl("a/b/c")).toBeNull();
+    expect(pantaMarketUrl("")).toBeNull();
+    expect(pantaMarketUrl("a b")).toBeNull();
+    expect(pantaMarketUrl("x".repeat(129))).toBeNull();
+  });
+
+  it("cannot throw on a lone surrogate (render must never blank the page)", () => {
+    expect(() => pantaMarketUrl("\ud800")).not.toThrow();
+    expect(pantaMarketUrl("\ud800")).toBeNull();
+  });
+});
+
+describe("shareText", () => {  it("strips control characters (newline/param smuggling vector)", () => {
     const out = shareText("Cool market\nhttps://evil.example/x\t<phish>");
     expect(out).not.toMatch(/[\u0000-\u001f\u007f]/);
     expect(out).toContain("https://evil.example/x");

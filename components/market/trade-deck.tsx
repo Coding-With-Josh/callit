@@ -25,6 +25,7 @@ import {
 } from "@/lib/format";
 import { useBuyOrder, type BuyOrderController, type BuyOrderStatus } from "./use-buy-order";
 import { PantaBadge } from "./panta-badge";
+import { PANTA_ORIGIN, pantaMarketUrl } from "@/lib/share/urls";
 
 interface TradeDeckProps {
   readonly market: Market;
@@ -180,7 +181,7 @@ export const TradeDeck = ({ market, readAt, provenance }: TradeDeckProps) => {
   const guard = requirePrimaryMarket(market);
 
   if (!guard.ok) {
-    return <GraduatedBand linkOut={guard.error} readAt={readAt} />;
+    return <GraduatedBand linkOut={guard.error} marketId={market.marketId} readAt={readAt} />;
   }
 
   return (
@@ -565,12 +566,20 @@ const BAND_COPY: Record<
 
 const GraduatedBand = ({
   linkOut,
+  marketId,
   readAt,
 }: {
   linkOut: MarketLinkOut;
+  /** The upstream market id — used to link to THAT market on Panta, not the site. */
+  marketId: string;
   readAt: AsOf;
 }) => {
   const copy = BAND_COPY[linkOut.phase];
+  // Phase 2 (fail-safe default): an id we cannot validate (or put in a URL)
+  // degrades to Panta's origin. `PANTA_ORIGIN` is genuinely Panta, so the
+  // "Trade on Panta" label stays true either way — we never fabricate a path
+  // from an unvalidated upstream value.
+  const href = pantaMarketUrl(marketId) ?? PANTA_ORIGIN;
   return (
     <section
       aria-label="Market state"
@@ -587,7 +596,7 @@ const GraduatedBand = ({
       </p>
       <div className="mt-6 flex flex-wrap items-center gap-4">
         <a
-          href="https://panta.market"
+          href={href}
           target="_blank"
           rel="noopener noreferrer"
           className="inline-flex items-center gap-2 rounded-full bg-[#FFF2DD] px-5 py-2.5 text-sm font-semibold tracking-tight text-[#2D1C00] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none"

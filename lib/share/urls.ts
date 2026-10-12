@@ -23,6 +23,21 @@ export const SHARE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const X_INTENT_HOST = "https://twitter.com/intent/tweet";
 const TELEGRAM_SHARE_HOST = "https://t.me/share/url";
 
+/**
+ * Panta's consumer app origin — the ONLY host a link-out may point at.
+ *
+ * Verified live (2026-10-12): `https://panta.market/market/{marketId}` is the
+ * per-market route (it renders the real market title for a valid id), while
+ * `/markets/`, `/event/`, `/events/`, `/prediction/`, `/trade/` and `/m/` all
+ * hard-404. `panta.market` itself is a Next.js app; `balr.market` (the name in
+ * Panta's own catalog docs) is an unbuilt parking page and is NOT this.
+ */
+export const PANTA_ORIGIN = "https://panta.market";
+
+/** The fixed prefix a per-market Panta link is built from. */
+const PANTA_MARKET_PREFIX = `${PANTA_ORIGIN}/market/`;
+
+
 /** Cap for the snippet placed into X/Telegram share text. */
 export const SHARE_TEXT_MAX = 120;
 
@@ -60,6 +75,30 @@ export function marketUrl(marketId: string): string | null {
 export function blinkUrl(marketId: string): string | null {
   if (!isShareableMarketId(marketId)) return null;
   return absoluteUrl(`/blink/${marketId}`);
+}
+
+/**
+ * The market's page on Panta, or null when the id is out of scope.
+ *
+ * Phase 3 (href injection / open redirect): the id is the SAME scope the share
+ * gates use — `^[A-Za-z0-9_-]{1,128}$` — which rejects `.`, `/` and `:`. That is
+ * what makes `..`, `//evil.com` and `javascript:` structurally impossible here
+ * rather than merely unlikely: the scheme and host are fixed by the constant
+ * prefix, and the only variable part cannot contain a path or scheme delimiter.
+ *
+ * Callers must treat null as "use PANTA_ORIGIN", never as "build something else".
+ */
+export function pantaMarketUrl(marketId: string): string | null {
+  if (!isShareableMarketId(marketId)) return null;
+  try {
+    const href = `${PANTA_MARKET_PREFIX}${encodeURIComponent(marketId)}`;
+    // Prefix assert, mirroring the intent builders: never return a string that
+    // is not pinned to the Panta origin, even if a future edit drifts.
+    return href.startsWith(PANTA_MARKET_PREFIX) ? href : null;
+  } catch {
+    // encodeURIComponent throws on lone surrogates.
+    return null;
+  }
 }
 
 /**
