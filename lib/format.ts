@@ -9,12 +9,20 @@ import type { AsOf, Price, UnixSeconds, UsdcDecimal } from "@/types";
 /**
  * "0.62" -> "62"; "0.625" -> "62.5"; "1" -> "100"; "0.05" -> "5".
  * Purely string-based — shifts the decimal point two places right.
+ *
+ * The fractional percent is TRUNCATED to `maxFraction` digits (default 1).
+ * `priceSchema` permits up to 9 decimals, so an uncapped price like
+ * "0.623456789" would render "62.3456789" — a string long enough to overflow its
+ * column at EVERY viewport width, not just narrow ones. The cap is the fix for
+ * that overflow; it never rounds (pure string truncation), consistent with the
+ * no-money-math rule at the top of this file.
  */
-export function percentFromPrice(price: Price): string {
+export function percentFromPrice(price: Price, maxFraction = 1): string {
   const [whole = "0", frac = ""] = price.split(".");
   const padded = `${frac}00`.slice(0, 2);
   const shiftedWhole = `${whole}${padded}`.replace(/^0+(?=\d)/, "");
-  const rest = frac.slice(2).replace(/0+$/, "");
+  const digits = Math.max(0, Math.trunc(maxFraction));
+  const rest = frac.slice(2, 2 + digits).replace(/0+$/, "");
   return rest ? `${shiftedWhole}.${rest}` : shiftedWhole;
 }
 
@@ -46,6 +54,42 @@ export function formatUsdc(usdc: UsdcDecimal): string {
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   const cents = `${frac}00`.slice(0, 2);
   return `$${grouped}.${cents}`;
+}
+
+/**
+ * A USDC TOTAL condensed for a stat line: "$842.10", "$84.2K", "$1.2M", "$3.4B".
+ *
+ * Below 1,000 it defers to formatUsdc (exact, two decimals). At or above 1,000 it
+ * truncates to one decimal inside the K/M/B unit, dropping a trailing ".0"
+ * ("$142K", not "$142.0K"). Purely string + BigInt — no float, matching the
+ * no-money-math rule at the top of this file.
+ *
+ * Scope: market VOLUME only (a read-only statistic). Never a fee, price, or
+ * amount a user is charged or that gets signed — those keep exact formatUsdc
+ * cents, because a compacted figure must never be mistaken for the real one.
+ */
+export function formatUsdcCompact(usdc: UsdcDecimal): string {
+  const [whole = "0"] = usdc.split(".");
+  // Digits-only per usdcDecimalSchema, so BigInt() cannot throw on a valid value.
+  const value = BigInt(whole);
+  if (value < BigInt(1000)) return formatUsdc(usdc);
+
+  const unit =
+    value < BigInt(1_000_000) ? "K" : value < BigInt(1_000_000_000) ? "M" : "B";
+  const divisor =
+    unit === "K"
+      ? BigInt(1_000)
+      : unit === "M"
+        ? BigInt(1_000_000)
+        : BigInt(1_000_000_000);
+
+  const scaled = value / divisor; // integer part of the unit
+  const tenth = (value % divisor) / (divisor / BigInt(10)); // first decimal, 0..9
+  const groupedScaled = scaled.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+  return tenth === BigInt(0)
+    ? `$${groupedScaled}${unit}`
+    : `$${groupedScaled}.${tenth}${unit}`;
 }
 
 /**
