@@ -4,6 +4,15 @@ import { Search } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState, type ReactNode } from "react";
 import { PantaBadge } from "@/components/market/panta-badge";
+import {
+  PAGE_SIZE,
+  SORT_KEYS,
+  compareMarkets,
+  displayTitle,
+  effectivePhase,
+  isPresentable,
+  type SortKey,
+} from "@/lib/browse-order";
 import { formatUsdcCompact, percentFromPrice } from "@/lib/format";
 import type { MarketFixture } from "@/lib/market-fixtures";
 import { MARKET_PHASES, type DataProvenance, type MarketPhase } from "@/types";
@@ -19,56 +28,10 @@ const PHASE_LABELS: Record<MarketPhase, string> = {
 const titleCase = (value: string): string =>
   value.charAt(0).toUpperCase() + value.slice(1);
 
-/** How the filtered list is ordered. Volume is the default (BigInt, no floats). */
-type SortKey = "volume" | "closing" | "newest";
-
-const SORT_KEYS: readonly SortKey[] = ["volume", "closing", "newest"];
-
 const SORT_LABELS: Record<SortKey, string> = {
   volume: "Highest volume",
   closing: "Closing soonest",
   newest: "Newest",
-};
-
-/** Rows revealed on first paint and on each "Load more" press. */
-const PAGE_SIZE = 12;
-
-/**
- * Compare two USDC decimal strings DESCENDING without float conversion: whole
- * units as BigInt, then the zero-padded 6-decimal fractions as strings. Ordering
- * only — never used to compute a displayed number.
- */
-const compareUsdcDesc = (a: string, b: string): number => {
-  const [aw = "0", af = ""] = a.split(".");
-  const [bw = "0", bf = ""] = b.split(".");
-  const wa = BigInt(aw);
-  const wb = BigInt(bw);
-  if (wa !== wb) return wa > wb ? -1 : 1;
-  const fa = `${af}000000`.slice(0, 6);
-  const fb = `${bf}000000`.slice(0, 6);
-  if (fa === fb) return 0;
-  return fa > fb ? -1 : 1;
-};
-
-/**
- * Deterministic ordering. `Array.prototype.sort` is stable, but a title tiebreak
- * makes the order identical across re-renders even when two markets share a
- * volume/time — no visible reshuffle on an unrelated state change.
- */
-const compareMarkets = (
-  a: MarketFixture,
-  b: MarketFixture,
-  sort: SortKey,
-): number => {
-  const A = a.market;
-  const B = b.market;
-  const primary =
-    sort === "volume"
-      ? compareUsdcDesc(A.volumeUsdc, B.volumeUsdc)
-      : sort === "closing"
-        ? A.endTime - B.endTime
-        : B.startTime - A.startTime;
-  return primary !== 0 ? primary : A.title.localeCompare(B.title);
 };
 
 type PhaseFilter = "all" | MarketPhase;
@@ -101,13 +64,13 @@ export const BrowseExplorer = ({
   const [visible, setVisible] = useState(PAGE_SIZE);
 
   // Panta returns `title: ""` for many settled/auto-generated markets, so a blank
-  // row with a price renders as if the UI were broken. Drop them at the source:
-  // every filter, chip, and count below derives from this one list, so nothing
+  // row renders as if the UI were broken. The rule is now asymmetric (see
+  // lib/browse-order::isPresentable): a SETTLED untitled market is dropped, but a
+  // still-live one is kept and labelled — in the live catalog the only buyable
+  // market is untitled, and dropping it hid the only actionable row.
+  // Every filter, chip, and count below derives from this one list, so nothing
   // can desync (Phase 3: count/state drift).
-  const presentable = useMemo(
-    () => items.filter((item) => item.market.title.trim() !== ""),
-    [items],
-  );
+  const presentable = useMemo(() => items.filter(isPresentable), [items]);
 
   // Panta fills odds/volume only when its RPC read succeeds; a degraded page
   // carries every row with a null price. Say so once, rather than leaving a
@@ -146,7 +109,7 @@ export const BrowseExplorer = ({
   }, [presentable]);
 
   const phases = useMemo(() => {
-    const present = new Set(presentable.map((item) => item.market.phase));
+    const present = new Set(presentable.map((item) => effectivePhase(item.market)));
     return MARKET_PHASES.filter((value) => present.has(value));
   }, [presentable]);
 
@@ -156,7 +119,7 @@ export const BrowseExplorer = ({
     const matched = presentable.filter((item) => {
       const { market } = item;
       if (category !== "all" && market.category !== category) return false;
-      if (phase !== "all" && market.phase !== phase) return false;
+      if (phase !== "all" && effectivePhase(market) !== phase) return false;
       if (needle === "") return true;
       // Search the whole public record, not just the title.
       return `${market.title} ${market.category} ${market.description}`
@@ -368,14 +331,17 @@ const MarketRow = ({ fixture }: { fixture: MarketFixture }) => {
       >
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 font-tusker-6700 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#2D1C00]/45">
-            <span>{PHASE_LABELS[market.phase]}</span>
+            {/* effectivePhase, not the raw wire `phase`: the wire value flips
+                between "resolved" and "secondary" for the same settled market
+                between reads, which made this label change on its own. */}
+            <span>{PHASE_LABELS[effectivePhase(market)]}</span>
             <span aria-hidden="true">·</span>
             <span>{market.category}</span>
           </div>
           {/* Text child: React escapes — never dangerouslySetInnerHTML on
               market copy (Phase 3: XSS vector). */}
           <p className="mt-1 truncate font-sans text-sm font-medium tracking-tight text-[#2D1C00] md:text-base">
-            {market.title}
+            {displayTitle(market)}
           </p>
         </div>
 
