@@ -75,7 +75,7 @@ export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
           <ShareMenu marketId={market.marketId} title={title} />
         </div>
 
-        <h1 className="mt-5 font-tusker-9800 text-4xl leading-[1.1] md:leading-[1.02] tracking-tight text-[#2D1C00] md:text-5xl">
+        <h1 className="mt-5 font-tusker-9800 text-4xl leading-[1.2] md:leading-[1.3] tracking-tight text-[#2D1C00] md:text-5xl">
           {/* Text child: React escapes — never dangerouslySetInnerHTML on
               market copy (Phase 3: XSS vector). */}
           {title}
