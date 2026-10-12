@@ -26,6 +26,7 @@ import {
   feeDisclosure,
   isoFromUnix,
   MIN_STANDARD_LEAD_SECONDS,
+  STANDARD_LEAD_MARGIN_SECONDS,
   unixSeconds,
   type AsOf,
   type CreateLifecycle,
@@ -308,10 +309,13 @@ export const CreateWizard = () => {
   // told the market opens on the day they set), and the lead this draft needs.
   const startDay = raw ? dayStartOf(raw.startTime) : dayStartOf(adapters.now());
   const opensLater = startDay > dayStartOf(adapters.now());
+  // The date input floors "today" to the lead; it targets the floor PLUS
+  // headroom (not the bare floor) so the resulting start is still inside the
+  // lead by the time the validator reads it a moment later.
   const startLeadSeconds =
     raw?.marketType === "breaking" && raw.eventInProgress === true
       ? 0
-      : MIN_STANDARD_LEAD_SECONDS;
+      : MIN_STANDARD_LEAD_SECONDS + STANDARD_LEAD_MARGIN_SECONDS;
 
   /**
    * The categories read is a PAID, shared-budget Panta read, so it must run

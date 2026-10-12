@@ -35,10 +35,11 @@ import {
   isExpired,
   MARKET_CATEGORY_SLUGS,
   marketId,
-  MIN_STANDARD_LEAD_SECONDS,
   ok,
   openCreateQuote,
   parseRawDraft,
+  standardStartFloor,
+  startOfUnixDay,
   txSignature,
   unsignedTransactionB64Schema,
   unixSeconds,
@@ -226,9 +227,38 @@ export async function validateDraftStep(
   } catch (error) {
     return err({ kind: "adapter", message: adapterMessage(error) });
   }
-  const result = validateDraft(lifecycle.raw, {
+  const now = adapters.now();
+  /**
+   * Phase 3 (stale-clock / boundary race): the lead rule is measured against a
+   * MOVING clock, so a start seeded at *exactly* the floor is valid for one
+   * instant and stale the next. The draft generator did precisely that
+   * (`now + MIN_STANDARD_LEAD_SECONDS`), so the user generated a draft, spent a
+   * second or more on the step, and every standard market failed with
+   * "standard markets must start at least 3700s from now" regardless of what
+   * they did. Re-floor a start that is on/after today to the FRESH floor
+   * (floor + headroom) before validating.
+   *
+   * Deliberately NOT applied to a start on a PAST day: the validator must still
+   * reject that (past-date injection) and a lift would silently rescue it. The
+   * lift only ever moves a start LATER, never earlier, and only when it would
+   * otherwise be inside the lead.
+   */
+  let raw = lifecycle.raw;
+  const usesBreaking =
+    raw.marketType === "breaking" && raw.eventInProgress === true;
+  const floor = usesBreaking ? unixSeconds(now) : standardStartFloor(now);
+  const startIsWellFormed =
+    Number.isInteger(raw.startTime) && raw.startTime >= 0;
+  if (
+    startIsWellFormed &&
+    startOfUnixDay(raw.startTime) >= startOfUnixDay(now) &&
+    raw.startTime < floor
+  ) {
+    raw = { ...raw, startTime: floor };
+  }
+  const result = validateDraft(raw, {
     categories,
-    now: adapters.now(),
+    now,
   });
   if (!result.ok) return err(result.error);
   return ok({ status: "validated", draft: result.value });
@@ -555,9 +585,11 @@ export const fixtureCreateAdapters: CreateAdapters = {
     category: "crypto",
     // Start date defaults to TODAY (the earliest open the standard lead rule
     // allows), anchored to the injectable clock — never a fixed future date,
-    // so a market can never open on a previous day. The wizard only lets the
-    // user move it forward.
-    startTime: BASE_NOW + MIN_STANDARD_LEAD_SECONDS,
+    // so a market can never open on a previous day. Seeded at the floor PLUS
+    // headroom (standardStartFloor), not at the bare floor: a value sitting on
+    // the boundary is invalid one second later. The wizard only lets the user
+    // move it forward.
+    startTime: standardStartFloor(BASE_NOW),
     endTime: BASE_NOW + 30 * DAY,
     resolutionTime: BASE_NOW + 31 * DAY,
     imageUrl: "https://fixture.example.com/cover.png",

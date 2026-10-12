@@ -36,7 +36,7 @@ import type { CreateAdapters } from '@/lib/create-market';
 import { describeSignRequestError } from '@/lib/solana/sign-messages';
 import {
   MARKET_CATEGORY_SLUGS,
-  MIN_STANDARD_LEAD_SECONDS,
+  standardStartFloor,
   txSignature,
   unixSeconds,
   type UnixSeconds,
@@ -102,7 +102,10 @@ export function useCreateAdapters(): CreateAdapters {
           resolutionRule: `Resolves to YES if "${claim}" is confirmed by a public source of truth by the resolution deadline; otherwise NO.`,
           sourcesOfTruth: [UNVERIFIED_DRAFT_SOURCE],
           category: 'crypto',
-          startTime: now + MIN_STANDARD_LEAD_SECONDS,
+          // Seed at the floor PLUS headroom, never at the bare floor: a start
+          // sitting exactly on the boundary is already invalid by the time the
+          // validator runs a moment later (the elapsed-clock bug this replaced).
+          startTime: standardStartFloor(now),
           endTime: now + 30 * DAY_SECONDS,
           resolutionTime: now + 31 * DAY_SECONDS,
           marketType: 'standard',

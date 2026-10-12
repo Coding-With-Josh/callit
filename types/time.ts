@@ -14,6 +14,32 @@ import { z } from 'zod';
  */
 export const MIN_STANDARD_LEAD_SECONDS = 3700;
 
+/**
+ * Headroom ABOVE the hard floor that callers should target when they *choose* a
+ * start time (as opposed to validating one).
+ *
+ * Why this exists: the lead rule is `start - now >= 3700`, evaluated against a
+ * clock that keeps moving. A draft that seeds its start at EXACTLY the floor is
+ * therefore valid for one instant and invalid the next — the wizard generated
+ * `now + 3700`, then validated seconds later, so every standard draft failed
+ * with "standard markets must start at least 3700s from now" no matter what the
+ * user did. Seeding at the floor is the single worst choice available.
+ *
+ * Targeting floor + margin means the value is still valid after the elapsed time
+ * between choosing it and the validator (and the upstream quote) reading it.
+ * This is a soft target for *producers*; `meetsStandardLead` stays strict.
+ */
+export const STANDARD_LEAD_MARGIN_SECONDS = 300;
+
+/**
+ * The start time a standard market should be seeded with at `now`: the hard
+ * floor plus {@link STANDARD_LEAD_MARGIN_SECONDS} of headroom. Producers (draft
+ * seeds, date-input flooring) use this so they never sit on the boundary.
+ */
+export function standardStartFloor(now: UnixSeconds): UnixSeconds {
+  return unixSeconds(now + MIN_STANDARD_LEAD_SECONDS + STANDARD_LEAD_MARGIN_SECONDS);
+}
+
 /** A non-negative integer number of seconds since the Unix epoch. */
 export const unixSecondsSchema = z
   .number()

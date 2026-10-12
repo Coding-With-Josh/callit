@@ -7,6 +7,8 @@ import {
   isExpired,
   startOfUnixDay,
   MIN_STANDARD_LEAD_SECONDS,
+  STANDARD_LEAD_MARGIN_SECONDS,
+  standardStartFloor,
 } from './time';
 
 const u = (value: number) => unixSecondsSchema.parse(value);
@@ -44,6 +46,25 @@ describe('time', () => {
     expect(startOfUnixDay(u(86_400 + 1))).toBe(86_400);
     expect(startOfUnixDay(u(1_700_123_456))).toBe(
       Math.floor(1_700_123_456 / 86_400) * 86_400,
+    );
+  });
+
+  it('seeds a standard start ABOVE the floor, not on it', () => {
+    // Regression: a start seeded at exactly the floor is stale one second
+    // later, because the rule is measured against a moving clock. The seed
+    // must clear the floor by the margin...
+    expect(standardStartFloor(u(1000))).toBe(
+      1000 + MIN_STANDARD_LEAD_SECONDS + STANDARD_LEAD_MARGIN_SECONDS,
+    );
+    // ...and still satisfy the strict rule at the moment it is seeded, with
+    // room to spare so an immediate re-check (validator, upstream quote) passes.
+    const now = u(1000);
+    const start = standardStartFloor(now);
+    expect(meetsStandardLead(start, now)).toBe(true);
+    expect(start - now).toBeGreaterThan(MIN_STANDARD_LEAD_SECONDS);
+    // A clock that advances by the margin is still inside the lead.
+    expect(meetsStandardLead(start, u(1000 + STANDARD_LEAD_MARGIN_SECONDS))).toBe(
+      true,
     );
   });
 

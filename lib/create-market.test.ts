@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canCreateTransition,
   MIN_STANDARD_LEAD_SECONDS,
+  STANDARD_LEAD_MARGIN_SECONDS,
   startOfUnixDay,
   unixSeconds,
   type CreateLifecycle,
@@ -292,7 +293,45 @@ describe('create-market pipeline', () => {
     const now = fixtureCreateAdapters.now();
     // Earliest valid open: at least the standard lead ahead, same calendar day.
     expect(lc.raw.startTime - now).toBeGreaterThanOrEqual(MIN_STANDARD_LEAD_SECONDS);
+    // Seeded with headroom, NOT on the boundary — a start at exactly the floor
+    // is already stale by the time the validator reads it.
+    expect(lc.raw.startTime - now).toBe(
+      MIN_STANDARD_LEAD_SECONDS + STANDARD_LEAD_MARGIN_SECONDS,
+    );
     expect(startOfUnixDay(lc.raw.startTime)).toBe(startOfUnixDay(now));
+  });
+
+  it('validates a standard draft even when the clock advanced past its seed', async () => {
+    // Regression for "standard markets must start at least 3700s from now" shown
+    // to a user who did nothing wrong. The draft is seeded at generation time and
+    // validated later, so ANY elapsed time used to push it under the moving-clock
+    // floor. Here the user spends 10 minutes on the step.
+    const t0 = fixtureCreateAdapters.now();
+    const dwelled: CreateAdapters = {
+      ...fixtureCreateAdapters,
+      now: () => unixSeconds(t0 + 600),
+      generateDraft: async (claim) => ({
+        question: claim,
+        resolutionRule: `Resolves to YES if ${claim} by the deadline; otherwise NO.`,
+        sourcesOfTruth: ['https://fixture.example.com/source-of-truth'],
+        category: 'crypto',
+        startTime: t0 + MIN_STANDARD_LEAD_SECONDS, // the old, boundary-sitting seed
+        endTime: t0 + 30 * 86_400,
+        resolutionTime: t0 + 31 * 86_400,
+        marketType: 'standard',
+        eventInProgress: false,
+      }),
+    };
+    const drafted = expectOk(await draftFromClaim(CLAIM, dwelled));
+    const validated = expectOk(await validateDraftStep(drafted, dwelled));
+    if (validated.status !== 'validated') throw new Error('expected validated');
+    // The start was re-floored against the FRESH clock: valid now, still today.
+    expect(validated.draft.startTime - dwelled.now()).toBeGreaterThanOrEqual(
+      MIN_STANDARD_LEAD_SECONDS,
+    );
+    expect(startOfUnixDay(validated.draft.startTime)).toBe(
+      startOfUnixDay(dwelled.now()),
+    );
   });
 
   it('rejects a draft whose start date is before today at the validator', async () => {
