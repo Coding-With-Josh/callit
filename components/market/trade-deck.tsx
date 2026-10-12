@@ -40,21 +40,51 @@ interface TradeDeckProps {
  * Two steps, deliberately (Phase 3: fee disclosure before signing):
  *  1. `Review order` fetches a quote and prepares an unsigned transaction; the
  *     slip then shows the real shares/price/fee from that quote.
- *  2. `Sign with wallet` prompts the wallet for the prepared bytes.
- * Nothing is submitted or broadcast; the signature is shown and the flow stops.
+ *  2. `Sign & send` prompts the wallet, which SUBMITS the transaction; the order
+ *     is then reported to Panta.
+ * The second step is the one that spends, and no control offers it twice: once
+ * the wallet has sent, the only pressable action left is an idempotent report.
  */
 const CTA_LABEL: Record<BuyOrderStatus, string> = {
   idle: "Review order",
   quoting: "Getting quote…",
   building: "Preparing order…",
-  ready: "Sign with wallet",
+  ready: "Sign & send",
   signing: "Confirm in your wallet…",
-  signed: "Signed ✓",
+  unconfirmed: "Check your positions first",
+  broadcast: "Submitting to Panta…",
+  submitted: "Order placed ✓",
+  reportFailed: "Report again",
 };
 
-/** True while a quote/build/sign request is in flight (inputs are frozen). */
+/**
+ * One fixed sentence per state. The post-`ready` states describe a transaction
+ * that is or may be ON-CHAIN, so none of them may claim the order did not
+ * happen (Phase 3: false reassurance after money moved). `broadcast` and
+ * `submitted` are kept apart so the copy only says Panta was told once it
+ * actually was.
+ */
+const statusNote = (status: BuyOrderStatus): string => {
+  switch (status) {
+    case "broadcast":
+      return "Your wallet submitted the order — it is on-chain and may already have filled. This slip will not send it again.";
+    case "submitted":
+      return "Order placed. Your wallet submitted it and Panta has recorded it.";
+    case "reportFailed":
+      return "Your order was submitted on-chain, but Panta has not recorded it yet. Reporting again re-sends the same order and cannot place a second one.";
+    case "unconfirmed":
+      return "We couldn't confirm whether your wallet submitted the order. Check your positions before buying again — an order may already have been placed.";
+    default:
+      return "Review fetches a live quote from Panta and prepares the order. Nothing is charged until you approve the transaction in your wallet — and approving it is also what submits it.";
+  }
+};
+
+/** True while a quote/build/sign/report request is in flight (inputs frozen). */
 const isBuyBusy = (status: BuyOrderStatus): boolean =>
-  status === "quoting" || status === "building" || status === "signing";
+  status === "quoting" ||
+  status === "building" ||
+  status === "signing" ||
+  status === "broadcast";
 
 const BuyCta = ({
   side,
@@ -94,9 +124,17 @@ const BuyCta = ({
   }
 
   const busy = isBuyBusy(buy.status);
-  const signed = buy.status === "signed";
   const canConfirm = buy.status === "ready";
-  const disabled = busy || signed || !amountValid || !ready;
+  const canReport = buy.status === "reportFailed";
+  // Once the wallet has sent, nothing may be pressable again: a re-sign would
+  // place a SECOND order (Phase 3: double spend by re-sign). `unconfirmed` is in
+  // this set because we cannot rule out that the order already landed.
+  const settled =
+    buy.status === "signing" ||
+    buy.status === "unconfirmed" ||
+    buy.status === "broadcast" ||
+    buy.status === "submitted";
+  const disabled = busy || settled || !amountValid || !ready;
 
   return (
     <button
@@ -105,6 +143,7 @@ const BuyCta = ({
       aria-busy={busy}
       onClick={() => {
         if (canConfirm) void buy.confirm();
+        else if (canReport) void buy.report();
         else onPrepare();
       }}
       className={`mt-5 flex w-full items-center justify-center gap-2 rounded-full py-3 text-sm font-semibold tracking-tight transition-transform duration-150 motion-reduce:transition-none ${
@@ -400,9 +439,11 @@ const BuySlip = ({
         value={amount}
         onChange={(e) => {
           setAmount(e.target.value);
-          // A prepared/signed order is for the old amount; drop it so the CTA
-          // never signs bytes that no longer match the field.
-          if (buy.status === "ready" || buy.status === "signed") buy.reset();
+          // A prepared/submitted order belongs to the old amount; drop it so the
+          // CTA never acts on bytes that no longer match the field. Non-idle
+          // includes the post-send states, which is the user's only way back to
+          // a fresh order after an ambiguous send.
+          if (buy.status !== "idle") buy.reset();
         }}
         placeholder="0.00"
         aria-label="Amount in USDC"
@@ -446,16 +487,17 @@ const BuySlip = ({
         </p>
       )}
 
-      {buy.status === "signed" && buy.signature && (
-        <p className="mt-3 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
-          Signed {formatSignatureShort(buy.signature)} — not submitted.
-        </p>
-      )}
+      {(buy.status === "broadcast" ||
+        buy.status === "submitted" ||
+        buy.status === "reportFailed") &&
+        buy.signature && (
+          <p className="mt-3 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
+            Submitted {formatSignatureShort(buy.signature)}
+          </p>
+        )}
 
       <p className="mt-3 text-xs leading-relaxed tracking-tight text-[#2D1C00]/50">
-        {buy.status === "signed"
-          ? "Your signature is ready. Submitting to Panta is not enabled here — nothing was broadcast."
-          : "Review fetches a live quote from Panta and prepares the order. Nothing is charged until you sign, and nothing is submitted here."}
+        {statusNote(buy.status)}
       </p>
 
       <div className="mt-4 flex items-center justify-between border-t border-[#2D1C00]/10 pt-3">

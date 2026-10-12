@@ -4,15 +4,16 @@
  * use-buy-order — the client orchestration for a primary buy.
  *
  * Owns: the two-step flow (prepare: quote -> build -> verify -> assemble, then
- * confirm: wallet sign), the session-mint retry on a 401, and the user-facing
- * status copy. Must not construct a transaction itself — every gate lives in
- * lib/buy/client and lib/solana/assemble.
+ * confirm: wallet sign AND send, then report to Panta), the session-mint retry on
+ * a 401, and the user-facing status copy. Must not construct a transaction
+ * itself — every gate lives in lib/buy/client and lib/solana/assemble.
  *
  * Phase 1 (complete mediation): the hooks here call only the app's own routes
- * (`/api/panta/buy/quote`, `/api/panta/buy/build`). Those routes re-authenticate
- * the session and re-derive the wallet server-side; nothing in this hook can
- * redirect the fee payer, and the client-side `wallet` used for verification is
- * the session identity wallet from Privy, not a caller-supplied string.
+ * (`/api/panta/buy/quote`, `/api/panta/buy/build`, `/api/panta/buy/submit`).
+ * Those routes re-authenticate the session and re-derive the wallet
+ * server-side; nothing in this hook can redirect the fee payer, and the
+ * client-side `wallet` used for verification is the session identity wallet from
+ * Privy, not a caller-supplied string.
  *
  * Phase 2 (no internals leak): an upstream failure returns only a status here;
  * the response body is never read, stored, or rendered. Every message the hook
@@ -24,6 +25,12 @@
  * Phase 3 (stale order): the assembled transaction carries Panta's blockhash
  * lifetime; confirm re-checks `buildExpiresAt` before prompting the wallet, so a
  * user who lingered on the review step cannot sign an expired order.
+ *
+ * The wallet SIGNS AND SENDS in one prompt (the shared capability in
+ * use-solana-signer). Panta does not broadcast for us: it needs the transaction
+ * on-chain before it will record the order, which is why the status stops at
+ * `broadcast` — on-chain, possibly already filled — BEFORE anything is claimed
+ * about the outcome, and why no status after that point offers a re-sign.
  */
 import { useCallback, useState } from 'react';
 import { useSolanaSigner } from '@/components/auth/use-solana-signer';
@@ -49,7 +56,24 @@ import {
 import { describeSignRequestError } from '@/lib/solana/sign-messages';
 import { describeAuthedFailure } from '@/lib/auth/session-mint';
 
-export type BuyOrderStatus = 'idle' | 'quoting' | 'building' | 'ready' | 'signing' | 'signed';
+export type BuyOrderStatus =
+  | 'idle'
+  | 'quoting'
+  | 'building'
+  | 'ready'
+  | 'signing'
+  /**
+   * A send failed in a way that cannot be told apart from "it may have landed".
+   * Deliberately NOT `ready`: offering an immediate re-sign from here is how a
+   * second order gets placed on top of one that already filled.
+   */
+  | 'unconfirmed'
+  /** Submitted on-chain; the report to Panta is in flight. */
+  | 'broadcast'
+  /** Submitted AND recorded by Panta. Terminal for this order. */
+  | 'submitted'
+  /** Submitted on-chain, but Panta has not recorded it. Reportable again. */
+  | 'reportFailed';
 
 /** The operands the user asked to buy, once each has passed its schema. */
 interface PreparedRequest {
@@ -72,6 +96,22 @@ function requestErrorMessage(status: number): string {
   return 'The order could not be prepared.';
 }
 
+/**
+ * Fixed copy for the REPORT step (submitting the already-broadcast order to
+ * Panta), keyed by our own status and never by the response body.
+ *
+ * Separate from `requestErrorMessage` because the meaning of a failure changed:
+ * the order is already on-chain by the time this runs, so a 400 ("that order
+ * isn't valid") would be a false statement about the user's input at the exact
+ * moment their money may have moved. Nothing here may claim the order did not
+ * happen (Phase 3: false reassurance after money moved).
+ */
+function reportErrorMessage(status: number): string {
+  if (status === 401 || status === 403) return 'Sign in to continue.';
+  if (status === 429) return 'Too many requests — wait a moment and try again.';
+  return "Your order was submitted, but Panta hasn't recorded it yet. Check your positions before buying again.";
+}
+
 export interface BuyOrderController {
   readonly status: BuyOrderStatus;
   readonly error: string | null;
@@ -79,13 +119,22 @@ export interface BuyOrderController {
   readonly signature: string | null;
   /** Quote -> build -> verify -> assemble. Populates `quote` and stops. */
   readonly prepare: (marketId: string, side: Side, amount: string) => Promise<void>;
-  /** Sign the prepared order. Refuses an expired or absent order (fail closed). */
+  /**
+   * Sign AND submit the prepared order. Refuses an expired or absent order (fail
+   * closed). This is the spending action: it opens the wallet, which submits the
+   * transaction, and then reports the result to Panta.
+   */
   readonly confirm: () => Promise<void>;
+  /**
+   * Re-report an order that was submitted but not recorded. Sends the SAME
+   * orderId + signature, so it can neither place a second order nor spend again.
+   */
+  readonly report: () => Promise<void>;
   readonly reset: () => void;
 }
 
 export function useBuyOrder(): BuyOrderController {
-  const { wallet, sign } = useSolanaSigner();
+  const { wallet, signAndSend } = useSolanaSigner();
   const [status, setStatus] = useState<BuyOrderStatus>('idle');
   const [error, setError] = useState<string | null>(null);
   const [quote, setQuote] = useState<BuyQuote | null>(null);
@@ -238,18 +287,82 @@ export function useBuyOrder(): BuyOrderController {
 
     setError(null);
     setStatus('signing');
-    const signed = await sign(transaction);
-    if (!signed.ok) {
-      // Back to `ready` so the user can retry without re-quoting.
+    // Sign AND send in one wallet prompt. The single-signer / session-wallet /
+    // decode gates run inside the signer BEFORE the wallet sees the bytes.
+    const sent = await signAndSend(transaction);
+    if (!sent.ok) {
+      if (sent.error.kind === 'send-failed') {
+        // Phase 3 (ambiguous send): the order may already be on-chain. Landing
+        // on `ready` would offer a re-sign and risk a second order, so this is
+        // its own state and the copy sends the user to their positions.
+        setStatus('unconfirmed');
+        setError(describeSignRequestError(sent.error));
+        return;
+      }
+      // Every other kind is refused BEFORE the prompt (no wallet, gate refusal,
+      // or the user rejecting it), so nothing was submitted and `ready` is an
+      // honest place to retry from.
       setStatus('ready');
-      setError(signErrorMessage(signed.error));
+      setError(signErrorMessage(sent.error));
       return;
     }
-    setSignature(signed.value.signature);
-    setStatus('signed');
-  }, [order, transaction, sign]);
+    setSignature(sent.value.signature);
+    // `broadcast` BEFORE the report: the transaction is already on-chain, so the
+    // order may exist and the funds may have moved from this moment on.
+    setStatus('broadcast');
 
-  return { status, error, quote, signature, prepare, confirm, reset };
+    // Report it to Panta. Panta does not broadcast for us — it records what it
+    // can see on-chain — so an unreported order is one Panta never indexes.
+    const reported = await authedJson('/api/panta/buy/submit', {
+      method: 'POST',
+      body: { orderId: order.orderId, signature: sent.value.signature },
+    });
+    if (!reported.ok) {
+      // NOT a failure of the order, only of the report. `reportFailed` keeps the
+      // signature, offers no re-sign, and can be retried idempotently.
+      setStatus('reportFailed');
+      setError(
+        describeAuthedFailure(
+          reported.status,
+          reported.sessionFailure,
+          reportErrorMessage,
+        ),
+      );
+      return;
+    }
+    setStatus('submitted');
+  }, [order, transaction, signAndSend]);
+
+  /**
+   * Re-report the submitted order (idempotent). Used from `reportFailed`, where
+   * a transient Panta failure or a session that had just expired left an on-chain
+   * order unrecorded.
+   */
+  const report = useCallback(async () => {
+    if (!order || !signature) {
+      setError('Prepare the order again before reporting it.');
+      return;
+    }
+    setError(null);
+    const reported = await authedJson('/api/panta/buy/submit', {
+      method: 'POST',
+      body: { orderId: order.orderId, signature },
+    });
+    if (!reported.ok) {
+      setStatus('reportFailed');
+      setError(
+        describeAuthedFailure(
+          reported.status,
+          reported.sessionFailure,
+          reportErrorMessage,
+        ),
+      );
+      return;
+    }
+    setStatus('submitted');
+  }, [order, signature]);
+
+  return { status, error, quote, signature, prepare, confirm, report, reset };
 }
 
 /**
