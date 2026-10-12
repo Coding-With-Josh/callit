@@ -21,6 +21,10 @@ import { TradeDeck } from "./trade-deck";
 export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
   const { market, asOf: readAt, provenance, disclaimer } = fixture;
 
+  // Panta returns `title: ""` for some markets (mostly settled/auto-generated).
+  // Direct links and Blinks still resolve here, so never render a blank heading.
+  const title = market.title.trim() || "Untitled market";
+
   // Server-rendered preview card: the Tusker face is embedded from disk (see
   // loadCoverFontCssServer) so the card renders in the house face with no client
   // JS. Any embed failure degrades to the system-ui fallback, never a throw.
@@ -68,13 +72,13 @@ export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
           </div>
           {/* Share island: client-side menu over server-validated market data
               (id + title come from the loaded market, not raw params). */}
-          <ShareMenu marketId={market.marketId} title={market.title} />
+          <ShareMenu marketId={market.marketId} title={title} />
         </div>
 
         <h1 className="mt-5 font-tusker-9800 text-4xl leading-[1.1] md:leading-[1.02] tracking-tight text-[#2D1C00] md:text-5xl">
           {/* Text child: React escapes — never dangerouslySetInnerHTML on
               market copy (Phase 3: XSS vector). */}
-          {market.title}
+          {title}
         </h1>
         <p className="mt-4 text-sm font-medium leading-relaxed tracking-tight text-[#2D1C00]/70 md:text-base">
           {market.description}

@@ -71,7 +71,10 @@ export function toDomainMarket(
       title: wire.title,
       description: wire.description,
       phase: wire.phase,
-      volumeUsdc: usdcDecimalSchema.parse(wire.volumeUsdc),
+      // The detail endpoint omits volume (null) for untraded/eventually-consistent
+      // reads; an absent volume is 0, never a reason to reject an otherwise valid
+      // market (Phase 2: fail-safe default). "not-a-number" still fails below.
+      volumeUsdc: usdcDecimalSchema.parse(wire.volumeUsdc ?? '0'),
       startTime: wireTimeToUnix(wire.startTime),
       endTime: wireTimeToUnix(wire.endTime),
       resolutionTime: wireTimeToUnix(wire.resolutionTime),

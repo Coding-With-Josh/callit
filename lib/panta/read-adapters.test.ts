@@ -120,6 +120,18 @@ describe('read adapters', () => {
     if (result.ok) expect(result.value.markets[0]?.yesPrice).toBeNull();
   });
 
+  it('accepts a null detail volumeUsdc instead of failing the whole read', async () => {
+    // Regression: the live detail endpoint returns `volumeUsdc: null` for the same
+    // market the list fills. Asserting a string here made every detail read fail
+    // and the page render "Market not found".
+    const { client } = clientResponding(wireMarket({ volumeUsdc: null }));
+    const result = await fetchMarket(client, 'mkt_1');
+    expect(result.ok).toBe(true);
+    if (result.ok && result.value.market) {
+      expect(result.value.market.volumeUsdc).toBe('0');
+    }
+  });
+
   it('returns a null market for a 404', async () => {
     const { client, calls } = clientResponding(
       { code: 'MARKET_NOT_FOUND', message: 'nope' },

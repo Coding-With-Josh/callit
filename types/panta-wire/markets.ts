@@ -44,7 +44,13 @@ export type MarketListQuery = z.infer<typeof marketListQuerySchema>;
 
 /**
  * Provenance: documented. A market as returned by Panta (same item shape for
- * list and detail). Prices are `null` in list rows and filled on detail.
+ * list and detail).
+ *
+ * Live deviation (verified against the pk_test API): the LIST fills `volumeUsdc`
+ * ("0.00") and prices, while the DETAIL can return `volumeUsdc: null` for the
+ * same market (unsettled/eventually-consistent reads). Because this one schema
+ * backs both endpoints, `volumeUsdc` MUST be nullable or every detail response
+ * fails validation — which upstream presents as a schema error, not a 404.
  */
 export const marketWireSchema = z.object({
   marketId: z.string(),
@@ -60,7 +66,8 @@ export const marketWireSchema = z.object({
   region: z.string(),
   resolved: z.boolean(),
   status: z.string(),
-  volumeUsdc: z.string(),
+  // Null when the detail read carries no traded volume (the list sends "0.00").
+  volumeUsdc: z.string().nullable(),
   campaignId: z.string().nullable(),
   createdByPartner: z.boolean(),
   yesPrice: z.string().nullable(),

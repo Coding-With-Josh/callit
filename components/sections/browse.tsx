@@ -3,6 +3,14 @@ import { loadMarketListing } from "@/lib/panta/catalog";
 import { BrowseExplorer } from "./browse-explorer";
 
 /**
+ * One upstream page per Browse view either way, so ask for the API's single-page
+ * max. Many live markets are untitled (filtered out in the client), so the
+ * default 24 leaves too little to browse. NOTE: this is still a single page —
+ * the catalog has a `nextCursor` that is not yet plumbed through.
+ */
+const BROWSE_LIMIT = 50;
+
+/**
  * The Browse surface. The section shell is static; the live market list streams
  * in from a Suspense boundary, so the landing stays prerenderable and the Panta
  * key never leaves the server. The interactive search + category filter live in
@@ -22,7 +30,7 @@ export const Browse = () => {
 };
 
 const BrowseData = async () => {
-  const listing = await loadMarketListing();
+  const listing = await loadMarketListing(BROWSE_LIMIT);
   return (
     <BrowseExplorer
       items={listing.items}

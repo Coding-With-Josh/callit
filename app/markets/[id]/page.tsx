@@ -32,6 +32,9 @@ export async function generateMetadata({
 
   const { market, provenance, disclaimer } = fixture;
 
+  // Panta returns an empty title for some markets; keep OG/SEO from going blank.
+  const title = market.title.trim() || "Untitled market";
+
   // Phase 3 (index-state injection): only a genuine live read with no Panta
   // sandbox notice is indexable. A fixture/demo id, or a pk_test read that
   // carries the "test mode" disclaimer, is real content for a human but not a
@@ -40,24 +43,24 @@ export async function generateMetadata({
 
   const description =
     market.description?.trim() ||
-    `Back YES or NO on "${market.title}" — a live prediction market on callit.`;
+    `Back YES or NO on "${title}" — a live prediction market on callit.`;
 
   // Canonical/OG use the requested id (not market.marketId) so the canonical
   // always equals the URL that was fetched — no self-contradicting canonical.
   return {
-    title: market.title,
+    title,
     description,
     alternates: { canonical: `/markets/${id}` },
     openGraph: {
       type: "website",
       siteName: SITE.name,
-      title: market.title,
+      title,
       description,
       url: `/markets/${id}`,
     },
     twitter: {
       card: "summary_large_image",
-      title: market.title,
+      title,
       description,
     },
     robots: indexable ? INDEXABLE_ROBOTS : NOINDEX_ROBOTS,
@@ -86,6 +89,7 @@ async function MarketRoute({ params }: PageProps) {
   if (!fixture) notFound();
 
   const { market } = fixture;
+  const title = market.title.trim() || "Untitled market";
   const url = absoluteUrl(`/markets/${id}`);
   const breadcrumb = {
     "@context": "https://schema.org",
@@ -97,19 +101,19 @@ async function MarketRoute({ params }: PageProps) {
         name: "Markets",
         item: absoluteUrl("/#browse"),
       },
-      { "@type": "ListItem", position: 2, name: market.title, item: url },
+      { "@type": "ListItem", position: 2, name: title, item: url },
     ],
   };
   const webpage = {
     "@context": "https://schema.org",
     "@type": "WebPage",
-    name: market.title,
+    name: title,
     description: market.description,
     url,
     inLanguage: "en",
     // References the WebSite node emitted in the root layout.
     isPartOf: { "@id": `${SITE.url}/#website` },
-    about: { "@type": "Thing", name: market.title },
+    about: { "@type": "Thing", name: title },
   };
 
   return (

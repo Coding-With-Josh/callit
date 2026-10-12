@@ -100,6 +100,15 @@ export const BrowseExplorer = ({
   const [sort, setSort] = useState<SortKey>("volume");
   const [visible, setVisible] = useState(PAGE_SIZE);
 
+  // Panta returns `title: ""` for many settled/auto-generated markets, so a blank
+  // row with a price renders as if the UI were broken. Drop them at the source:
+  // every filter, chip, and count below derives from this one list, so nothing
+  // can desync (Phase 3: count/state drift).
+  const presentable = useMemo(
+    () => items.filter((item) => item.market.title.trim() !== ""),
+    [items],
+  );
+
   // Every filter change resets the window to the first page IN THE SAME handler,
   // so "Load more" can never leave the user deep inside a list whose top they can
   // no longer reason about. Done here rather than in an effect: a synchronous
@@ -124,19 +133,19 @@ export const BrowseExplorer = ({
   // Filter chips are derived from the data actually present, so a chip can never
   // select a value with no rows behind it (no dead-end filters).
   const categories = useMemo(() => {
-    const unique = new Set(items.map((item) => item.market.category));
+    const unique = new Set(presentable.map((item) => item.market.category));
     return [...unique].sort((a, b) => a.localeCompare(b));
-  }, [items]);
+  }, [presentable]);
 
   const phases = useMemo(() => {
-    const present = new Set(items.map((item) => item.market.phase));
+    const present = new Set(presentable.map((item) => item.market.phase));
     return MARKET_PHASES.filter((value) => present.has(value));
-  }, [items]);
+  }, [presentable]);
 
   const needle = query.trim().toLowerCase();
 
   const filtered = useMemo(() => {
-    const matched = items.filter((item) => {
+    const matched = presentable.filter((item) => {
       const { market } = item;
       if (category !== "all" && market.category !== category) return false;
       if (phase !== "all" && market.phase !== phase) return false;
@@ -147,7 +156,7 @@ export const BrowseExplorer = ({
         .includes(needle);
     });
     return [...matched].sort((a, b) => compareMarkets(a, b, sort));
-  }, [items, category, phase, needle, sort]);
+  }, [presentable, category, phase, needle, sort]);
 
   const shown = filtered.slice(0, visible);
   const hasMore = filtered.length > shown.length;
@@ -172,25 +181,8 @@ export const BrowseExplorer = ({
           </p>
         </div>
 
-        {categories.length > 0 && (
-          <FilterGroup label="Category">
-            <FilterChip
-              label="All"
-              active={category === "all"}
-              onClick={() => changeCategory("all")}
-            />
-            {categories.map((value) => (
-              <FilterChip
-                key={value}
-                label={titleCase(value)}
-                active={category === value}
-                onClick={() => changeCategory(value)}
-              />
-            ))}
-          </FilterGroup>
-        )}
-
-        {phases.length > 0 && (
+        <div className="flex flex-col gap-6">
+           {phases.length > 0 && (
           <FilterGroup label="Phase">
             <FilterChip
               label="All"
@@ -208,6 +200,25 @@ export const BrowseExplorer = ({
           </FilterGroup>
         )}
 
+           {categories.length > 0 && (
+          <FilterGroup label="Category">
+            <FilterChip
+              label="All"
+              active={category === "all"}
+              onClick={() => changeCategory("all")}
+            />
+            {categories.map((value) => (
+              <FilterChip
+                key={value}
+                label={titleCase(value)}
+                active={category === value}
+                onClick={() => changeCategory(value)}
+              />
+            ))}
+          </FilterGroup>
+        )}
+
+       
         <FilterGroup label="Sort">
           {SORT_KEYS.map((value) => (
             <FilterChip
@@ -219,6 +230,7 @@ export const BrowseExplorer = ({
           ))}
         </FilterGroup>
       </div>
+        </div>
 
       {/* ---- RIGHT column: search bar on top, results area below ---- */}
       <div className="flex flex-1 flex-col gap-6 min-w-0">
@@ -238,7 +250,7 @@ export const BrowseExplorer = ({
           />
         </div>
 
-        {items.length === 0 ? (
+        {presentable.length === 0 ? (
           <ResultsPlaceholder message="No markets are live right now." />
         ) : (
           <div className="flex flex-1 flex-col min-w-0">
