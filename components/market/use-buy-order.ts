@@ -313,10 +313,8 @@ export function useBuyOrder(): BuyOrderController {
 
     // Report it to Panta. Panta does not broadcast for us — it records what it
     // can see on-chain — so an unreported order is one Panta never indexes.
-    const reported = await authedJson('/api/panta/buy/submit', {
-      method: 'POST',
-      body: { orderId: order.orderId, signature: sent.value.signature },
-    });
+    // `reportOrder` retries only the transient "not visible yet" answer.
+    const reported = await reportOrder(order.orderId, sent.value.signature);
     if (!reported.ok) {
       // NOT a failure of the order, only of the report. `reportFailed` keeps the
       // signature, offers no re-sign, and can be retried idempotently.
@@ -336,7 +334,7 @@ export function useBuyOrder(): BuyOrderController {
   /**
    * Re-report the submitted order (idempotent). Used from `reportFailed`, where
    * a transient Panta failure or a session that had just expired left an on-chain
-   * order unrecorded.
+   * order unrecorded. Bounded retries happen inside `reportOrder`, on 503 only.
    */
   const report = useCallback(async () => {
     if (!order || !signature) {
@@ -344,10 +342,7 @@ export function useBuyOrder(): BuyOrderController {
       return;
     }
     setError(null);
-    const reported = await authedJson('/api/panta/buy/submit', {
-      method: 'POST',
-      body: { orderId: order.orderId, signature },
-    });
+    const reported = await reportOrder(order.orderId, signature);
     if (!reported.ok) {
       setStatus('reportFailed');
       setError(
@@ -374,4 +369,39 @@ function signErrorMessage(error: SignRequestError): string {
     return 'Reconnect your wallet to sign.';
   }
   return describeSignRequestError(error);
+}
+
+/**
+ * The report retry policy.
+ *
+ * Panta indexes from the chain, so a report sent the instant after the send
+ * legitimately answers `TX_NOT_FOUND` — which our route maps to 503, a "not
+ * recorded yet" state, NOT "nothing happened" — until it catches up. A retry
+ * re-sends the SAME orderId + signature, so it can neither place a second order
+ * nor spend again.
+ *
+ * Never retried: 409/400 (a refused body or a finished session — retrying tells
+ * the user nothing new) and anything else that is not 503.
+ */
+const REPORT_RETRY_DELAYS_MS = [750, 1_500, 3_000, 3_000] as const;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** POST the report, retrying transient (503) answers only. Idempotent per call. */
+async function reportOrder(
+  orderId: string,
+  signature: string,
+): Promise<Awaited<ReturnType<typeof authedJson>>> {
+  const send = () =>
+    authedJson('/api/panta/buy/submit', {
+      method: 'POST',
+      body: { orderId, signature },
+    });
+  let res = await send();
+  for (const delay of REPORT_RETRY_DELAYS_MS) {
+    if (res.ok || res.status !== 503) break;
+    await sleep(delay);
+    res = await send();
+  }
+  return res;
 }

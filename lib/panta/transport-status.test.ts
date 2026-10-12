@@ -8,7 +8,11 @@
  * are signed out", which told a signed-in user to sign in.
  */
 import { describe, expect, it } from 'vitest';
-import { registerErrorStatus, transportErrorStatus } from './transport-status';
+import {
+  registerErrorStatus,
+  submitErrorStatus,
+  transportErrorStatus,
+} from './transport-status';
 import type { PantaTransportError } from './client';
 
 const http = (status: number): PantaTransportError => ({
@@ -148,6 +152,54 @@ describe('registerErrorStatus', () => {
     for (const error of all) {
       expect(registerErrorStatus(error)).not.toBe(401);
       expect(registerErrorStatus(error)).not.toBe(403);
+    }
+  });
+});
+
+describe('submitErrorStatus (the buy report)', () => {
+  const known = (status: number, code: string): PantaTransportError => ({
+    kind: 'http',
+    status,
+    error: { kind: 'known', code: code as never, message: 'upstream failure' },
+  });
+
+  it('marks a transaction Panta cannot see yet as TRANSIENT (503)', () => {
+    // The buy report has the same visibility lag as register: the wallet has
+    // already submitted the order, so a 404 TX_NOT_FOUND says "not indexed yet",
+    // not "nothing happened". It must be retryable with the SAME signature,
+    // which is why the client's report loop retries 503 only.
+    expect(submitErrorStatus(known(404, 'TX_NOT_FOUND'))).toBe(503);
+  });
+
+  it('does not invent buy-specific meaning for other 4xx codes', () => {
+    // Unlike register there is no "session is finished" code here, so a 400 stays
+    // a 400 and the client copy for a failed report is what keeps the user from
+    // being told the order did not happen.
+    expect(submitErrorStatus(known(400, 'INVALID_MARKET_PARAMS'))).toBe(400);
+    expect(submitErrorStatus(known(400, 'CREATE_EXPIRED'))).toBe(400);
+    const unknown: PantaTransportError = {
+      kind: 'http',
+      status: 404,
+      error: { kind: 'unknown', rawCode: 'SOMETHING_NEW_404', message: 'x' },
+    };
+    expect(submitErrorStatus(unknown)).toBe(404);
+  });
+
+  it('never returns 401 or 403 for any report failure', () => {
+    const all: readonly PantaTransportError[] = [
+      known(404, 'TX_NOT_FOUND'),
+      known(400, 'INVALID_MARKET_PARAMS'),
+      known(401, 'UNAUTHORIZED'),
+      known(403, 'FORBIDDEN'),
+      known(500, 'INTERNAL_ERROR'),
+      { kind: 'timeout', timeoutMs: 1 },
+      { kind: 'config', message: 'x' },
+      { kind: 'network', message: 'x' },
+      { kind: 'malformed', message: 'x' },
+    ];
+    for (const error of all) {
+      expect(submitErrorStatus(error)).not.toBe(401);
+      expect(submitErrorStatus(error)).not.toBe(403);
     }
   });
 });

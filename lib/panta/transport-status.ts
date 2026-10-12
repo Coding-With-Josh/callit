@@ -83,9 +83,41 @@ export function registerErrorStatus(error: PantaTransportError): number {
     ) {
       return 409;
     }
-    // Transient visibility, or a 404 we do not recognise (which falls through to
-    // the shared mapping and stays a 404 — fail closed without failing blind).
-    if (error.status === 404 && code === 'TX_NOT_FOUND') return 503;
   }
-  return transportErrorStatus(error);
+  return txVisibilityIsTransient(error) ?? transportErrorStatus(error);
+}
+
+/**
+ * `TX_NOT_FOUND` as a status, for the steps that report an ALREADY-BROADCAST
+ * transaction (register for create, submit for buy). Returns `null` when this is
+ * not that case, so the caller can fall through to the shared mapping.
+ *
+ * Panta indexes from the chain, so a report sent the instant after the send
+ * legitimately arrives before Panta can see the transaction. That is a lag, not a
+ * verdict about money — and it must never be answered with a status the client
+ * renders as "nothing happened" (Phase 3: false reassurance after money moved).
+ * A 503 says "transient, report the SAME signature again", which is the only
+ * safe retry: it cannot spend or create twice.
+ *
+ * Read only from the closed, documented error CODE, never the free-text message.
+ */
+function txVisibilityIsTransient(error: PantaTransportError): number | null {
+  if (error.kind !== 'http') return null;
+  // An unrecognised 404 stays a 404 — fail closed without failing blind.
+  return error.status === 404 && pantaCodeOf(error) === 'TX_NOT_FOUND'
+    ? 503
+    : null;
+}
+
+/**
+ * The status for a SUBMIT (buy report) transport error.
+ *
+ * Same visibility-lag semantics as register: the wallet has already sent the
+ * transaction, so `TX_NOT_FOUND` is transient and gets the identical 503. There
+ * are no buy-specific 4xx codes here — anything else falls through to the shared
+ * mapping, and the client's copy for a failed report never claims the order did
+ * not happen.
+ */
+export function submitErrorStatus(error: PantaTransportError): number {
+  return txVisibilityIsTransient(error) ?? transportErrorStatus(error);
 }

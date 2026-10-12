@@ -17,7 +17,7 @@
  * upstream body stay server-side — an unexpected throw is a 502 with fixed copy.
  */
 import { NextResponse, type NextRequest } from 'next/server';
-import { pantaClientOr503, transportErrorResponse, transportOf, NO_STORE } from '@/lib/panta/route-helpers';
+import { pantaClientOr503, submitErrorStatus, transportOf, NO_STORE } from '@/lib/panta/route-helpers';
 import { submitBuyOrder } from '@/lib/panta/buy-adapters';
 import { requireAuthFromRequest } from '@/lib/auth/require-auth';
 import type { BuyAdaptersConfig } from '@/lib/panta/buy-adapters';
@@ -37,7 +37,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(r,{status:200,headers:NO_STORE});
   } catch (e){
     const transport = transportOf(e);
-    if (transport) return transportErrorResponse(transport);
+    if (transport) {
+      // submitErrorStatus, not transportErrorStatus: `TX_NOT_FOUND` here is a
+      // visibility lag on an order that is ALREADY on-chain, and must be a 503
+      // the client retries with the same signature — never a status that reads
+      // as "nothing happened".
+      return NextResponse.json(
+        { error: 'submit failed' },
+        { status: submitErrorStatus(transport), headers: NO_STORE },
+      );
+    }
     // Phase 2 (fail closed): an UNEXPECTED throw is still a refusal, and its
     // message is never returned to the caller.
     return NextResponse.json({ error:'submit failed' },{ status:502, headers:NO_STORE });
