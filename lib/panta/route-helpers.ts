@@ -24,6 +24,7 @@ import {
   type PantaTransportError,
 } from './client';
 import { requireAuthFromRequest, type AuthResult } from '@/lib/auth/require-auth';
+import { transportErrorStatus } from './transport-status';
 
 /** Every catalog read is live and must not be cached or replayed. */
 export const NO_STORE = {
@@ -81,18 +82,14 @@ export async function requirePantaAuth(
 /**
  * The HTTP status for a transport error.
  *
- * Split out from `transportErrorResponse` so a caller that needs a DIFFERENT
- * response envelope (the public Actions routes, which must carry CORS headers —
- * Phase 3: a client whose preflight passed but whose error response omits
- * `Access-Control-Allow-Origin` fails opaquely) can reuse the same mapping
- * instead of re-deriving it and drifting.
+ * Lives in its own pure module (./transport-status) so the mapping — which
+ * decides whether a failure reads as the caller's problem or the upstream's —
+ * can be unit-tested without pulling in `next/server`. Re-exported here because
+ * the public Actions routes (which must carry CORS headers — Phase 3: a client
+ * whose preflight passed but whose error response omits
+ * `Access-Control-Allow-Origin` fails opaquely) consume it from this module.
  */
-export function transportErrorStatus(error: PantaTransportError): number {
-  if (error.kind === 'http') return error.status >= 500 ? 502 : error.status;
-  if (error.kind === 'timeout') return 504;
-  if (error.kind === 'config') return 503;
-  return 502;
-}
+export { transportErrorStatus } from './transport-status';
 
 /**
  * A user-safe message for a transport error. The body carries only this string —

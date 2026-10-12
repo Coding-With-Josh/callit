@@ -24,7 +24,7 @@
 import { useMemo } from 'react';
 import { useSolanaSigner } from '@/components/auth/use-solana-signer';
 import { authedJson } from '@/components/auth/authed-json';
-import { describeSessionFailure } from '@/lib/auth/session-mint';
+import { describeAuthedFailure } from '@/lib/auth/session-mint';
 import {
   describeCreateClientError,
   describeSourceCheckError,
@@ -159,15 +159,18 @@ export function useCreateAdapters(): CreateAdapters {
         });
         // The failure body is never read (Phase 2) — only the status number.
         if (!res.ok) {
-          // Should no longer occur now the route is anonymous, but if a 401 ever
-          // comes back it is not "you are signed out": report the session
-          // failure's own reason. This is the case that showed "Connect your
-          // wallet to check sources" while the wallet pill displayed a connected
-          // wallet.
-          if (res.sessionFailure) {
-            return { ok: false, reason: describeSessionFailure(res.sessionFailure) };
-          }
-          return { ok: false, reason: describeSourceCheckError(res.status) };
+          // An ANONYMOUS-route 401 should not happen any more, but a session
+          // failure here is not "you are signed out": report the mint's own
+          // reason. This is the case that showed "Connect your wallet to check
+          // sources" while the wallet pill displayed a connected wallet.
+          return {
+            ok: false,
+            reason: describeAuthedFailure(
+              res.status,
+              res.sessionFailure,
+              describeSourceCheckError,
+            ),
+          };
         }
         return parseSourceVerdict(res.data);
       },
@@ -177,7 +180,17 @@ export function useCreateAdapters(): CreateAdapters {
           method: 'POST',
           body: { draft, imageUrl },
         });
-        if (!res.ok) throw new Error(describeCreateClientError(res.status));
+        // A session failure must name itself, not read as "sign in" — that is
+        // the copy that told a signed-in user to sign in.
+        if (!res.ok) {
+          throw new Error(
+            describeAuthedFailure(
+              res.status,
+              res.sessionFailure,
+              describeCreateClientError,
+            ),
+          );
+        }
         return parseCreateQuote(res.data);
       },
 
@@ -186,7 +199,15 @@ export function useCreateAdapters(): CreateAdapters {
           method: 'POST',
           body: { createId: quote.createId },
         });
-        if (!res.ok) throw new Error(describeCreateClientError(res.status));
+        if (!res.ok) {
+          throw new Error(
+            describeAuthedFailure(
+              res.status,
+              res.sessionFailure,
+              describeCreateClientError,
+            ),
+          );
+        }
         return parseCreateBuild(res.data);
       },
 

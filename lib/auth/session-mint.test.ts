@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  describeAuthedFailure,
   describeSessionFailure,
   type SessionFailureKind,
 } from './session-mint';
@@ -59,5 +60,44 @@ describe('describeSessionFailure', () => {
     const message = describeSessionFailure('not-persisted').toLowerCase();
     expect(message).toContain('did not stick');
     expect(message).not.toContain('refused');
+  });
+});
+
+describe('describeAuthedFailure', () => {
+  const statusCopy = (status: number): string =>
+    status === 401 || status === 403 ? 'Sign in to continue.' : `status ${status}`;
+
+  it('prefers the session reason over the "sign in" status copy', () => {
+    // The regression: a 401 whose mint failed for its own reason used to render
+    // "Sign in to continue." — a false claim about a connected user.
+    expect(describeAuthedFailure(401, 'no-wallet', statusCopy)).toBe(
+      describeSessionFailure('no-wallet'),
+    );
+    expect(describeAuthedFailure(401, 'no-token', statusCopy)).not.toContain(
+      'Sign in to continue.',
+    );
+  });
+
+  it('falls back to the flow copy when there is no session failure', () => {
+    // A plain 401 with no mint involved (or any non-auth status) keeps the
+    // flow's own vocabulary — a buy failure and a create failure differ.
+    expect(describeAuthedFailure(401, undefined, statusCopy)).toBe('Sign in to continue.');
+    expect(describeAuthedFailure(409, undefined, statusCopy)).toBe('status 409');
+  });
+
+  it('never returns the status code itself for a session failure', () => {
+    const kinds: readonly SessionFailureKind[] = [
+      'no-token',
+      'rejected',
+      'no-wallet',
+      'unavailable',
+      'network',
+      'not-persisted',
+    ];
+    for (const kind of kinds) {
+      const message = describeAuthedFailure(401, kind, statusCopy);
+      expect(message).not.toContain('401');
+      expect(message).not.toContain('Sign in');
+    }
   });
 });

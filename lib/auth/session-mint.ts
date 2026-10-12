@@ -58,3 +58,23 @@ export function describeSessionFailure(kind: SessionFailureKind): string {
   }
   return 'Your sign-in session did not stick — reconnect your wallet and try again.';
 }
+
+/**
+ * The message for a FAILED guarded request.
+ *
+ * When the request failed because a session could not be established, the mint's
+ * own reason is the true one: it is specific, and (for most kinds) actionable.
+ * The flow's status copy for a 401 says "Sign in to continue.", which is a FALSE
+ * statement about a user whose wallet pill is showing a connected wallet — and
+ * one they cannot act on, because they cannot sign in any harder.
+ *
+ * `statusCopy` stays a parameter so each flow keeps its own vocabulary for the
+ * non-auth statuses (a buy failure and a create failure must not share copy).
+ */
+export function describeAuthedFailure(
+  status: number,
+  sessionFailure: SessionFailureKind | undefined,
+  statusCopy: (status: number) => string,
+): string {
+  return sessionFailure ? describeSessionFailure(sessionFailure) : statusCopy(status);
+}

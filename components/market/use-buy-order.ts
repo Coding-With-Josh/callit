@@ -47,6 +47,7 @@ import {
   verifyBuyOrder,
 } from '@/lib/buy/client';
 import { describeSignRequestError } from '@/lib/solana/sign-messages';
+import { describeAuthedFailure } from '@/lib/auth/session-mint';
 
 export type BuyOrderStatus = 'idle' | 'quoting' | 'building' | 'ready' | 'signing' | 'signed';
 
@@ -63,6 +64,9 @@ function requestErrorMessage(status: number): string {
   if (status === 400) return "That order isn't valid. Check the amount and try again.";
   if (status === 404) return 'That market is no longer available to buy.';
   if (status === 429) return 'Too many requests — wait a moment and try again.';
+  // 502 is this app's wrapper around an upstream Panta failure (including
+  // Panta rejecting our credentials — never the caller's session).
+  if (status === 502) return 'Trading is temporarily unavailable.';
   if (status === 503) return 'Trading is temporarily unavailable.';
   if (status === 504) return "Panta didn't respond in time.";
   return 'The order could not be prepared.';
@@ -143,7 +147,16 @@ export function useBuyOrder(): BuyOrderController {
       });
       if (!quoteRes.ok) {
         setStatus('idle');
-        setError(requestErrorMessage(quoteRes.status));
+        // A session failure names itself; only a non-auth failure falls back to
+        // the status copy. "Sign in to continue." for a mint failure is the
+        // false statement this avoids.
+        setError(
+          describeAuthedFailure(
+            quoteRes.status,
+            quoteRes.sessionFailure,
+            requestErrorMessage,
+          ),
+        );
         return;
       }
       const parsedQuote = parseBuyQuote(quoteRes.data);
@@ -161,7 +174,13 @@ export function useBuyOrder(): BuyOrderController {
       });
       if (!buildRes.ok) {
         setStatus('idle');
-        setError(requestErrorMessage(buildRes.status));
+        setError(
+          describeAuthedFailure(
+            buildRes.status,
+            buildRes.sessionFailure,
+            requestErrorMessage,
+          ),
+        );
         return;
       }
       const parsedOrder = parseBuiltOrder(buildRes.data);

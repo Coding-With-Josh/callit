@@ -150,6 +150,9 @@ export function describeCreateClientError(status: number): string {
   if (status === 409) return 'Panta refused this market. Change the claim or the schedule and try again.';
   if (status === 422) return "Panta can't quote this market as written. Adjust the resolution rule or the sources.";
   if (status === 429) return 'Too many requests — wait a moment and try again.';
+  // 502 is this app's wrapper around an upstream Panta failure — including
+  // Panta rejecting OUR credentials, which is never the caller's session.
+  if (status === 502) return 'Market creation is temporarily unavailable.';
   if (status === 503) return 'Market creation is temporarily unavailable.';
   if (status === 504) return "Panta didn't respond in time.";
   return 'The create request could not be completed.';

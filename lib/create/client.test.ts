@@ -158,5 +158,9 @@ describe('describeCreateClientError', () => {
     expect(describeCreateClientError(0)).toBe(
       'The create request could not be completed.',
     );
+    // 502 is an upstream Panta failure, including Panta rejecting our own
+    // credentials — it must never render as "sign in".
+    expect(describeCreateClientError(502)).not.toBe('Sign in to continue.');
+    expect(describeCreateClientError(502)).toContain('unavailable');
   });
 });
