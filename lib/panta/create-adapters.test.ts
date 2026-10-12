@@ -59,6 +59,7 @@ function adapters(client: ReturnType<typeof routingClient>['client']) {
     },
     uploadImage: async () => 'https://cdn.example.com/cover.png',
     signCreate: async () => txSignature('1'.repeat(88)),
+    broadcastCreate: async () => txSignature('1'.repeat(88)),
     now: () => unixSeconds(1_700_000_000),
   });
 }
@@ -219,6 +220,7 @@ describe('create adapters', () => {
       },
       uploadImage: async () => 'https://cdn.example.com/cover.png',
       signCreate: async () => txSignature('1'.repeat(88)),
+      broadcastCreate: async () => txSignature('1'.repeat(88)),
       now: () => unixSeconds(1_700_000_000),
       verifySource: injected,
     });

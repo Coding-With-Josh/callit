@@ -222,24 +222,30 @@ describe('describeRegisterClientError', () => {
     }
   });
 
-  it('distinguishes "gone" (410) from "already used" (409) instead of blurring them', () => {
-    // The two failures look similar and mean opposite things. 409 = the session
-    // is finished and a charge may have happened, so it must send the user to
-    // their own record. 410 = Panta holds no transaction, so nothing can have
-    // been charged — but the signature is spent and only a rebuild can help.
-    const gone = describeRegisterClientError(410);
-    const used = describeRegisterClientError(409);
-    expect(gone).toContain('nothing was submitted');
-    expect(gone).toMatch(/build it again/i);
-    expect(gone).not.toMatch(/check your markets/i);
-    expect(gone).not.toBe(used);
+  it('never claims nothing was submitted, because register runs after the send', () => {
+    // The invariant that matters most on this path. Register only ever runs once
+    // the wallet has BROADCAST the transaction, so every outcome it can report is
+    // about a transaction that may already exist on-chain and a fee that may
+    // already have moved. Any branch that said "nothing was submitted" would be
+    // false and would invite the user to create a second market (Phase 3: false
+    // reassurance after money moved).
+    for (const status of [0, 400, 409, 500, 502, 503, 504]) {
+      expect(describeRegisterClientError(status)).not.toMatch(
+        /nothing was submitted|nothing was charged|no money moved/i,
+      );
+    }
   });
 
-  it('does state plainly when nothing was submitted', () => {
-    // A 400 is a refusal BEFORE submission (our perimeter, or Panta refusing the
-    // submission), and a failed submit does not consume the create session — so
-    // a retry is safe and the copy may say so.
-    expect(describeRegisterClientError(400)).toContain('nothing was submitted');
+  it('reports 503 as submitted-not-yet-registered, never as a failed submission', () => {
+    // 503 is TX_NOT_FOUND surviving the transport's own bounded retries: Panta
+    // indexes from the chain and has not seen the submitted transaction yet. The
+    // submission itself is not in question, and repeating it would create a
+    // second market, so the copy must describe the transaction as submitted and
+    // send the user to their own record.
+    const pending = describeRegisterClientError(503);
+    expect(pending).toMatch(/submitted/i);
+    expect(pending).toMatch(/check your markets/i);
+    expect(pending).toMatch(/don't submit it again/i);
   });
 
   it('never renders a register failure as "sign in"', () => {

@@ -1,11 +1,12 @@
 /**
- * POST /api/panta/create/register — submit the signed create. THE money step.
+ * POST /api/panta/create/register — report the submitted create. THE money step
+ * is the wallet prompt upstream of this; THIS step only records it.
  *
- * This is the only route in the app that can cause a real market to exist
- * on-chain and a real payment to move, because Panta submits the transaction the
- * user just signed. It is deliberately a separate call from the build (which only
- * assembles the transaction) and from signing (which happens in the browser), so
- * that "sign" and "submit" are two distinct, separately-intentioned actions.
+ * The transaction has already been broadcast by the time this is called (the
+ * wallet signs and sends in one prompt), so by the time this route runs a market
+ * may already exist on-chain and the fee may already have moved. That is the fact
+ * every status this route returns has to respect: it can report success, or an
+ * UNCONFIRMED outcome, but it must never tell the caller nothing happened.
  *
  * Phase 1 (complete mediation): the session guard is applied here, per route, so
  * this file cannot inherit it — and cannot silently skip it either. The body is
@@ -24,8 +25,9 @@
  * Phase 3 (misattributed failure): an upstream 400 is NOT forwarded as a 400.
  * At this stage a 400 would be rendered as "that draft isn't valid", pointing at
  * fields the user cannot fix, which is false. The documented error CODE decides
- * whether the create session is finished (409) or the submission merely failed
- * (400, safely retryable — a failed submit does not consume the createId).
+ * whether the create session is finished (409) or Panta simply cannot see the
+ * submitted transaction yet (503 — transient, and the client retries the SAME
+ * report; retrying cannot spend or create twice).
  */
 import { NextResponse, type NextRequest } from 'next/server';
 import {

@@ -8,6 +8,7 @@ import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import { useSolanaSigner } from "@/components/auth/use-solana-signer";
 import { useCreateAdapters } from "./use-create-adapters";
 import {
+  broadcastStep,
   buildStep,
   checkResolvabilityStep,
   checkSource,
@@ -17,7 +18,6 @@ import {
   openQuoteStep,
   registerStep,
   requireVerifiedSource,
-  signStep,
   uploadCoverStep,
   validateDraftStep,
   type CreateMarketError,
@@ -52,7 +52,7 @@ import {
  *
  * Phase 1 (complete mediation): the island never constructs a lifecycle object
  * itself. Every stage it renders comes back from lib/create-market, so the only
- * way to reach `validated` / `resolvable` / `quoted` / `built` / `signed` is
+ * way to reach `validated` / `resolvable` / `quoted` / `built` / `broadcast` is
  * through the service's validators and transition guards. A revision goes
  * through `editDraft` (a fresh `drafted`), never a hand-built draft.
  *
@@ -410,9 +410,11 @@ export const CreateWizard = () => {
         return 3;
       case "built":
         return 4;
-      // Signing is its own step; submitting the signed transaction is the last
-      // one, so `signed` sits ON "Create" rather than having finished the flow.
+      // `broadcast` is "submitted, being reported to Panta", so the flow sits ON
+      // "Create". `signed` (sign-only) has not reached the network at all and sits
+      // there too — it is never a terminal state a user can be left in.
       case "signed":
+      case "broadcast":
         return 5;
       // Past the end: on the terminal success every label reads as done.
       case "registered":
@@ -555,36 +557,35 @@ export const CreateWizard = () => {
     });
 
   /**
-   * built -> signed. The only path to a wallet prompt: the pipeline's signStep
-   * checks the stage transition, and the adapter's signCreate runs the
-   * single-signer gate before the wallet sees any bytes.
+   * built -> broadcast. THE submission: the pipeline's `broadcastStep` checks the
+   * transition, and the adapter's `broadcastCreate` asks the wallet to sign AND
+   * send in one prompt (the signer gate runs before the wallet sees the bytes).
+   *
+   * This is the only path to a wallet prompt, and therefore the only way money
+   * can move in this app.
    */
-  const onSignTransaction = () =>
+  const onBroadcastTransaction = () =>
     run(async () => {
       if (!lifecycle || lifecycle.status !== "built") return;
       setError(null);
-      const signed = await signStep(lifecycle, adapters);
-      if (!signed.ok) {
-        setError(signed.error);
+      const broadcast = await broadcastStep(lifecycle, adapters);
+      if (!broadcast.ok) {
+        setError(broadcast.error);
         return;
       }
-      setLifecycle(signed.value);
+      setLifecycle(broadcast.value);
     });
 
   /**
-   * signed -> registered. The ONLY action in this app that submits anything, and
-   * the only one that can move money: the pipeline's `registerStep` re-checks the
-   * transition table, and the adapter hands the signature to our own route, which
-   * re-authenticates the session before Panta is ever called.
-   *
-   * Kept separate from signing on purpose. Signing produces a signature over
-   * Panta's transaction and submits nothing; this hands that signature over. The
-   * two are deliberately different buttons so the irreversible step cannot happen
-   * as a side effect of the wallet prompt.
+   * broadcast -> registered. NOT a submission: the transaction is already on the
+   * network, and this REPORTS it so Panta records the market. It is retryable
+   * and idempotent — the same signature is re-sent, so it can neither spend nor
+   * create a second market — which is why it survives the transport's own
+   * bounded retry as a button the user can press again.
    */
   const onRegister = () =>
     run(async () => {
-      if (!lifecycle || lifecycle.status !== "signed") return;
+      if (!lifecycle || lifecycle.status !== "broadcast") return;
       setError(null);
       const registered = await registerStep(lifecycle, adapters);
       if (!registered.ok) {
@@ -614,11 +615,9 @@ export const CreateWizard = () => {
   const resolveActive = status === "resolvable";
   const quoteReached = status === "quoted" || status === "create_expired";
 
-  // Narrowed phase for the sign step. Null means the flow has not reached §05.
-  const signPhase: "quoted" | "built" | "signed" | null =
-    status === "quoted" || status === "built" || status === "signed"
-      ? status
-      : null;
+  // Narrowed phase for the submit step. Null means the flow has not reached §05.
+  const submitPhase: "quoted" | "built" | null =
+    status === "quoted" || status === "built" ? status : null;
 
   /**
    * The quoted fee, rendered on the submit button itself. The fee authority is
@@ -629,7 +628,8 @@ export const CreateWizard = () => {
     lifecycle &&
     (lifecycle.status === "quoted" ||
       lifecycle.status === "built" ||
-      lifecycle.status === "signed")
+      lifecycle.status === "signed" ||
+      lifecycle.status === "broadcast")
       ? formatUsdc(lifecycle.quote.paymentUsdc)
       : null;
 
@@ -650,8 +650,8 @@ export const CreateWizard = () => {
         </h1>
         <p className="mt-4 max-w-xl text-sm font-medium leading-relaxed tracking-tight text-[#2D1C00]/70 md:text-base">
           Paste the claim, shape how it resolves, see the fee from Panta&apos;s
-          quote, then sign. Signing costs nothing — the fee is charged only when
-          you create the market, on the last step.
+          quote, then submit. Nothing is charged until you approve the transaction
+          in your wallet, on the last step.
         </p>
         <div className="mt-5 flex flex-wrap items-center gap-3">
           <PantaBadge />
@@ -1148,47 +1148,87 @@ export const CreateWizard = () => {
           </Section>
         )}
 
-        {/* 05 — Sign (gated; hard stop before signing) */}
-        {signPhase && (
-          <Section index={5} title="Sign" state="active">
+        {/* 05 — Submit (gated; hard stop before the wallet prompt) */}
+        {submitPhase && (
+          <Section index={5} title="Submit" state="active">
             <SignStep
-              phase={signPhase}
+              phase={submitPhase}
               busy={busy}
-              signature={
-                lifecycle?.status === "signed" ? lifecycle.signature : null
-              }
               fee={signFee ?? ""}
               onBuild={onBuildTransaction}
-              onSign={onSignTransaction}
-              onCreate={onRegister}
+              onSubmit={onBroadcastTransaction}
             />
             <ErrorPanel error={error} />
           </Section>
         )}
 
-        {/* 06 — Create: the submitted market. Terminal success. */}
-        {lifecycle?.status === "registered" && (
-          <Section index={6} title="Create" state="active">
-            <div className="flex flex-col gap-4">
-              <div>
+        {/* 06 — Create: submitted, then reported to Panta. Terminal success. */}
+        {(lifecycle?.status === "broadcast" ||
+          lifecycle?.status === "registered") && (
+          <Section
+            index={6}
+            title="Create"
+            state="active"
+            summary={
+              lifecycle.status === "registered"
+                ? "Market is live"
+                : "Submitted — registering"
+            }
+          >
+            {lifecycle.status === "broadcast" ? (
+              <div className="flex flex-col gap-3">
+                <p className="font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/70">
+                  Submitted {formatSignatureShort(lifecycle.signature)}
+                </p>
                 <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
-                  The market is live. Your signature was submitted, the market
-                  was created on-chain, and the creation fee was charged.
+                  Your wallet signed and submitted the transaction, so the market
+                  may already exist on-chain and the fee may already have moved.
+                  What is left is <span className="font-semibold">reporting</span>{" "}
+                  it to Panta — it indexes from the chain, so it can take a moment
+                  to see. Checking again re-sends the same report and cannot create
+                  a second market.
                 </p>
-                <p className="mt-2 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/50">
-                  {lifecycle.marketId}
-                </p>
-              </div>
-              <div className="flex flex-wrap items-center gap-3">
-                <Link
-                  href={`/markets/${lifecycle.marketId}`}
-                  className="rounded-full bg-[#2D1C00] px-5 py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none"
+                <button
+                  type="button"
+                  disabled={busy}
+                  aria-busy={busy}
+                  onClick={onRegister}
+                  className="flex w-full items-center justify-center gap-2 rounded-full bg-[#2D1C00] py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:scale-100"
                 >
-                  Open market
+                  {busy && <Loader2 className="size-4 animate-spin" />}
+                  {busy ? "Checking…" : "Check registration again"}
+                </button>
+                <Link
+                  href="/markets"
+                  className="text-sm font-medium tracking-tight text-[#2D1C00]/70 underline decoration-[#2D1C00]/30 underline-offset-4 transition hover:text-[#2D1C00]"
+                >
+                  Check your markets
                 </Link>
-                <Pill onClick={onStartOver}>Create another</Pill>
+                <ErrorPanel error={error} />
               </div>
-            </div>
+            ) : (
+              <div className="flex flex-col gap-4">
+                <div>
+                  <p className="text-sm leading-relaxed tracking-tight text-[#2D1C00]/70">
+                    The market is live. Your wallet submitted the transaction, the
+                    market was created on-chain, the creation fee was charged, and
+                    Panta has registered it.
+                  </p>
+                  <p className="mt-2 font-mono text-[11px] leading-relaxed tracking-tight text-[#2D1C00]/50">
+                    {lifecycle.marketId}
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-3">
+                  <Link
+                    href={`/markets/${lifecycle.marketId}`}
+                    className="rounded-full bg-[#2D1C00] px-5 py-3 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none"
+                  >
+                    Open market
+                  </Link>
+                  <Pill onClick={onStartOver}>Create another</Pill>
+                </div>
+              </div>
+            )}
           </Section>
         )}
 

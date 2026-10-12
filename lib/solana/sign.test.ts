@@ -33,6 +33,7 @@ import {
   decodeUnsignedTransactionB64,
   extractSignatureFromSigned,
   getSingleRequiredSigner,
+  signatureFromBytes,
   SolanaSignError,
 } from './sign';
 
@@ -159,5 +160,40 @@ describe('extractSignatureFromSigned', () => {
     expect(() => extractSignatureFromSigned(new Uint8Array([1, 2, 3]))).toThrowError(
       SolanaSignError,
     );
+  });
+});
+/**
+ * The sign-and-send path returns a signature but NOT a signed transaction, so
+ * `extractSignatureFromSigned` cannot be used there. This encoder is the only
+ * proof that path has, which is why the length check is the security-relevant
+ * part: a truncated or empty result must never be read as a successful
+ * submission (Phase 2).
+ */
+describe('signatureFromBytes', () => {
+  it('base58-encodes a 64-byte signature (all-zero key is "1" per zero byte)', () => {
+    expect(signatureFromBytes(new Uint8Array(64))).toBe('1'.repeat(64));
+  });
+
+  it('refuses any length other than 64 bytes', () => {
+    for (const length of [0, 1, 63, 65, 128]) {
+      let thrown: unknown;
+      try {
+        signatureFromBytes(new Uint8Array(length));
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(SolanaSignError);
+      expect((thrown as SolanaSignError).kind).toBe('invalid-signature');
+    }
+  });
+
+  it('round-trips a decoded wallet signature', () => {
+    const bytes = new Uint8Array(64);
+    for (let i = 0; i < 64; i += 1) bytes[i] = (i * 7) % 251;
+    const encoded = signatureFromBytes(bytes);
+    // A 64-byte signature is 87-88 base58 characters: the alphabet excludes
+    // 0/O/I/l, and the width is the point — a shorter string means lost bytes.
+    expect(encoded).toMatch(/^[1-9A-HJ-NP-Za-km-z]{86,88}$/);
+    expect(encoded.length).toBeGreaterThanOrEqual(86);
   });
 });

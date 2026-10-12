@@ -101,17 +101,19 @@ describe('registerErrorStatus', () => {
     expect(registerErrorStatus(unknown)).toBe(400);
   });
 
-  it('marks a missing transaction as 410 (gone), NOT as a finished session', () => {
-    // Verified live: a real createId that was never built answers
-    // 404 TX_NOT_FOUND. Panta cannot submit a transaction it does not hold, so
-    // nothing was charged and a retry is meaningful (after a rebuild). Reporting
-    // the ambiguous 409 here would tell the user a market may exist when it
-    // cannot — a false statement in the alarming direction.
-    expect(registerErrorStatus(known(404, 'TX_NOT_FOUND'))).toBe(410);
+  it('marks a transaction Panta cannot see yet as TRANSIENT (503), not as terminal', () => {
+    // Observed live: a real createId answers 404 TX_NOT_FOUND. Register REPORTS a
+    // transaction that has already been broadcast by the wallet, and Panta
+    // indexes from the chain — so this is what a visibility lag looks like, not a
+    // verdict about money. It must be retryable (503), because the earlier
+    // mapping (410, "nothing was submitted") was a lie in the dangerous
+    // direction: the transaction IS on-chain and the fee HAS moved, and a user
+    // told otherwise is being invited to submit a second market.
+    expect(registerErrorStatus(known(404, 'TX_NOT_FOUND'))).toBe(503);
   });
 
-  it('does not give an unrecognised 404 the "nothing was submitted" treatment', () => {
-    // Fail closed: only the code actually observed live earns that claim.
+  it('does not give an unrecognised 404 the "not visible yet" treatment', () => {
+    // Fail closed: only the code actually observed live earns that reading.
     const unknown: PantaTransportError = {
       kind: 'http',
       status: 404,

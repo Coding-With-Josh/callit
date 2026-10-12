@@ -113,6 +113,7 @@ live('panta live smoke', () => {
       },
       uploadImage: async () => 'https://picsum.photos/1024',
       signCreate: async () => txSignature('1'.repeat(88)),
+      broadcastCreate: async () => txSignature('1'.repeat(88)),
       now: () => unixSeconds(Math.floor(Date.now() / 1000)),
     });
     // pk_test returns a 30-byte fake PDA, which is not a Solana address, so the

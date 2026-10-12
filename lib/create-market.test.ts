@@ -16,6 +16,7 @@ import {
 } from '@/types';
 import {
   buildStep,
+  broadcastStep,
   checkResolvabilityStep,
   checkSource,
   draftFromClaim,
@@ -74,6 +75,13 @@ describe('create-market pipeline', () => {
     if (lc.status === 'signed') {
       expect(lc.signature.length).toBeGreaterThanOrEqual(64);
     }
+
+    // A signature is NOT a market: Panta registers what it can see on-chain, so
+    // registering straight from the sign-only stage is refused by the table.
+    expectErr(await registerStep(lc, fixtureCreateAdapters));
+
+    lc = expectOk(await broadcastStep(lc, fixtureCreateAdapters));
+    expect(lc.status).toBe('broadcast');
 
     lc = expectOk(await registerStep(lc, fixtureCreateAdapters));
     expect(lc.status).toBe('registered');
