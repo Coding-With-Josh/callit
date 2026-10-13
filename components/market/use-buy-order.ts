@@ -105,12 +105,17 @@ function requestErrorMessage(status: number): string {
   if (status === 409) return "This market isn't open for buying right now.";
   if (status === 429) return 'Too many requests — wait a moment and try again.';
   // 502 is this app's wrapper around an upstream Panta failure (including
-  // Panta rejecting our credentials — never the caller's session). 503 is a
-  // transient failure: the upstream is unreachable, or (after the adapter's
-  // bounded re-rolls) Panta could not read this market's live price for the
-  // request. Both mean "try again", and neither claims anything about the order.
+  // Panta rejecting our credentials — never the caller's session).
   if (status === 502) return 'Trading is temporarily unavailable.';
-  if (status === 503) return 'Trading is temporarily unavailable.';
+  // 503 is the transient case: after the adapter's bounded re-rolls, Panta could
+  // not read this market's live price for the request (its unpriced windows are
+  // measured at ~2-11s, median ~10s, so an in-request re-roll cannot outlast one).
+  // The copy therefore says what is true (nothing was sent, and the remedy is
+  // another press) rather than the vaguer "unavailable" — this is the exact
+  // failure a user hit while holding a perfectly valid amount.
+  if (status === 503) {
+    return "Panta isn't serving a price for this market right now — nothing was sent. Wait a few seconds and press Review order again.";
+  }
   if (status === 504) return "Panta didn't respond in time.";
   return 'The order could not be prepared.';
 }
