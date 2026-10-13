@@ -12,6 +12,7 @@
  * signed-in user to sign in (a false statement about their own state, and an
  * unactionable one). Upstream auth failures therefore become 502.
  */
+import { fieldErrors } from '@/types';
 import type { PantaTransportError } from './client';
 
 export function transportErrorStatus(error: PantaTransportError): number {
@@ -107,6 +108,79 @@ function txVisibilityIsTransient(error: PantaTransportError): number | null {
   return error.status === 404 && pantaCodeOf(error) === 'TX_NOT_FOUND'
     ? 503
     : null;
+}
+
+/**
+ * Whether the error body actually names offending fields.
+ *
+ * This is the ONLY thing that separates "your request was wrong" from "Panta
+ * could not serve this market on this request". Both arrive as a 400 with the
+ * same code, so the distinguishing signal is the serializer's own `field`/`fields`
+ * (live evidence: `{"code":"INVALID_MARKET_PARAMS","message":"amountUsdc: This
+ * field is required.","fields":{...}}` for a bad field, versus a bare
+ * `{"code":"INVALID_MARKET_PARAMS"}` for a market Panta could not price).
+ */
+function hasFieldErrors(error: PantaTransportError): boolean {
+  if (error.kind !== 'http') return false;
+  return (
+    error.error.field !== undefined ||
+    Object.keys(fieldErrors(error.error)).length > 0
+  );
+}
+
+/**
+ * True when a QUOTE failed because Panta's live on-chain price read missed for
+ * this request — the transient case, and the only one worth re-rolling.
+ *
+ * Measured live (2026-10-13): the SAME market, side and amount answered 200 nine
+ * times and this bare `INVALID_MARKET_PARAMS` once, while a market with no price
+ * data at all (its `/prices/` read 404s) answers the same bare code every time.
+ * So the code means "no price for this market on this request", not "your order
+ * is invalid" — the same per-request lottery the catalog already retries.
+ */
+export function isUnpriceableQuoteError(error: PantaTransportError): boolean {
+  return (
+    error.kind === 'http' &&
+    error.status === 400 &&
+    pantaCodeOf(error) === 'INVALID_MARKET_PARAMS' &&
+    !hasFieldErrors(error)
+  );
+}
+
+/**
+ * The status for a QUOTE transport error.
+ *
+ * Forwarding the upstream 400 verbatim made the client render
+ * "That order isn't valid. Check the amount and try again." for every one of
+ * these — a false statement about the user's input in all but one case, and one
+ * that points at something that is not the problem. The documented CODES are
+ * what tell the cases apart; only the code is read, never the message:
+ *
+ *   AMOUNT_TOO_SMALL      (400) the amount was wrong  -> 400, the one case the
+ *                                client's amount copy is finally true for
+ *   MARKET_NOT_IN_PRIMARY (400) it graduated/resolved between load and quote
+ *                                -> 409 (a conflict with current state)
+ *   MARKET_NOT_FOUND      (400) no such market        -> 404
+ *   INVALID_MARKET_PARAMS (400) no live price on THIS request -> 503 (transient;
+ *                                the adapter re-rolls it before the caller sees it)
+ *
+ * Everything else falls through to the shared mapping, so an unrecognised code
+ * keeps failing closed rather than acquiring invented meaning.
+ */
+export function quoteErrorStatus(error: PantaTransportError): number {
+  if (error.kind === 'http' && error.status === 400) {
+    const code = pantaCodeOf(error);
+    if (code === 'AMOUNT_TOO_SMALL') return 400;
+    if (code === 'MARKET_NOT_IN_PRIMARY') return 409;
+    if (code === 'MARKET_NOT_FOUND') return 404;
+    if (isUnpriceableQuoteError(error)) {
+      // Our own "transient, try again" — NOT the upstream's status, which the
+      // shared mapping would turn into a 502 (a server fault the user cannot act
+      // on) or forward as a 400 (a claim about their input).
+      return 503;
+    }
+  }
+  return transportErrorStatus(error);
 }
 
 /**

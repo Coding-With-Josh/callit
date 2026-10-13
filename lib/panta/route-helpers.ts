@@ -89,7 +89,12 @@ export async function requirePantaAuth(
  * whose preflight passed but whose error response omits
  * `Access-Control-Allow-Origin` fails opaquely) consume it from this module.
  */
-export { registerErrorStatus, submitErrorStatus, transportErrorStatus } from './transport-status';
+export {
+  quoteErrorStatus,
+  registerErrorStatus,
+  submitErrorStatus,
+  transportErrorStatus,
+} from './transport-status';
 
 /**
  * A user-safe message for a transport error. The body carries only this string —
@@ -104,9 +109,27 @@ export function transportErrorMessage(error: PantaTransportError): string {
 
 /** Map a transport error to a response. */
 export function transportErrorResponse(error: PantaTransportError): NextResponse {
+  return transportErrorResponseMapped(error, transportErrorStatus);
+}
+
+/**
+ * Map a transport error to a response using a STEP-SPECIFIC status mapping.
+ *
+ * Phase 3 (false copy about the caller's operands): the shared mapping forwards
+ * an upstream 4xx verbatim, and the client renders a 400 as "that order isn't
+ * valid, check the amount" — which is a lie for a failure that is a fact about
+ * the market or the upstream, not about the request. The buy steps therefore
+ * pass their own mapper (`quoteErrorStatus`, `submitErrorStatus`) so each
+ * documented error CODE becomes the status whose fixed copy is true for it.
+ * The message is never read for the decision and never varies here.
+ */
+export function transportErrorResponseMapped(
+  error: PantaTransportError,
+  status: (error: PantaTransportError) => number,
+): NextResponse {
   return NextResponse.json(
     { error: transportErrorMessage(error) },
-    { status: transportErrorStatus(error), headers: NO_STORE },
+    { status: status(error), headers: NO_STORE },
   );
 }
 

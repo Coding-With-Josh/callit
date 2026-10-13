@@ -8,7 +8,6 @@
 import {
   type BuyQuote,
   type BuiltOrder,
-  type Result,
   type Side,
   type UsdcDecimal,
 } from '@/types';
@@ -22,15 +21,43 @@ import {
   primaryOrderVerifyRequestSchema,
   primaryOrderVerifyResponseSchema,
 } from '@/types/panta-wire/buy';
-import { baseUnitsToUsdcDecimal, baseUnitsFromJson, baseUnitsJsonSchema, parseVerifyAmount } from '@/types/money';
-import { quoteIdSchema, orderIdSchema, txSignatureSchema, marketIdSchema, walletAddressSchema } from '@/types/ids';
+import { parseVerifyAmount } from '@/types/money';
+import { quoteIdSchema, orderIdSchema, marketIdSchema, walletAddressSchema } from '@/types/ids';
 import { priceSchema, sharesSchema, usdcDecimalSchema } from '@/types/money';
-import type { PantaClient, PantaTransportError } from './client';
+import type { PantaClient } from './client';
 import { PantaCallError, wireBaseUnitsToUsdc, wireIsoToUnixSeconds } from './client';
+import { isUnpriceableQuoteError } from './transport-status';
 
 export interface BuyAdaptersConfig {
   readonly client: PantaClient;
   readonly wallet: string;
+}
+
+/**
+ * Attempts for the QUOTE call, and the flat delay between them.
+ *
+ * Phase 3 (unpriceable market): the quote is the one buy step where re-rolling
+ * is free. Measured live (2026-10-13) against `/primaryorderquote/`: the SAME
+ * market, side and amount answered 200 nine times in ten and a bare
+ * `{"code":"INVALID_MARKET_PARAMS"}` (no message, no `fields`) once, while a
+ * market with no price data at all answers that bare code every time. So the
+ * code means "Panta could not read this market's on-chain price for THIS
+ * request" — a per-request lottery, not a statement about the order. Retrying
+ * it is what resolves it (the user otherwise gets an error about operands that
+ * are fine).
+ *
+ * This is deliberately bounded and deliberately NOT applied to build or submit.
+ * A quote creates no order and moves no money — it persists a throwaway
+ * `quoteId` with a ~90s expiry — whereas build/submit are the steps a retry
+ * could genuinely duplicate (Phase 3: retry as a duplication primitive). Only
+ * `isUnpriceableQuoteError` is retried, so a graduated market, an amount error,
+ * a bad id or an auth rejection still fail on the first answer, unchanged.
+ */
+export const QUOTE_ATTEMPTS = 4;
+const QUOTE_RETRY_BASE_DELAY_MS = 140;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mapOrThrow<T>(map: () => T): T {
@@ -64,12 +91,29 @@ export async function requestBuyQuote(
     amountUsdc: args.amountUsdc,
     userId: args.userId,
   });
-  const r = await config.client.request({
-    method: 'POST',
-    path: '/primaryorderquote/',
-    body,
-    schema: primaryOrderQuoteResponseSchema,
-  });
+  // The SAME frozen body is sent on every attempt: no operand is re-derived from
+  // anything a caller supplied between attempts (Phase 3: parameter substitution
+  // via a retry), and `wallet` stays the session/report wallet from `config`.
+  const requestOnce = () =>
+    config.client.request({
+      method: 'POST',
+      path: '/primaryorderquote/',
+      body,
+      schema: primaryOrderQuoteResponseSchema,
+    });
+
+  let r = await requestOnce();
+  for (
+    let attempt = 1;
+    attempt < QUOTE_ATTEMPTS && !r.ok && isUnpriceableQuoteError(r.error);
+    attempt++
+  ) {
+    // Flat delay with jitter: these failures are independent per request, so
+    // there is nothing to back off from — the wait only avoids making a tight
+    // loop against an upstream account we share a 120 req/min budget with.
+    await sleep(QUOTE_RETRY_BASE_DELAY_MS + Math.floor(Math.random() * 110));
+    r = await requestOnce();
+  }
   if (!r.ok) throw new PantaCallError(r.error);
   return mapOrThrow(() => ({
     quoteId: quoteIdSchema.parse(r.value.quoteId),

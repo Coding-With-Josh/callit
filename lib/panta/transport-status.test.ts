@@ -9,6 +9,8 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  isUnpriceableQuoteError,
+  quoteErrorStatus,
   registerErrorStatus,
   submitErrorStatus,
   transportErrorStatus,
@@ -209,6 +211,130 @@ describe('submitErrorStatus (the buy report)', () => {
     for (const error of all) {
       expect(submitErrorStatus(error)).not.toBe(401);
       expect(submitErrorStatus(error)).not.toBe(403);
+    }
+  });
+});
+
+describe('quoteErrorStatus (the buy quote)', () => {
+  const known = (status: number, code: string): PantaTransportError => ({
+    kind: 'http',
+    status,
+    error: { kind: 'known', code: code as never, message: 'upstream failure' },
+  });
+  /** A 400 whose body names the offending field(s), the serializer's own shape. */
+  const fielded = (
+    fields: Readonly<Record<string, readonly string[]>>,
+  ): PantaTransportError => ({
+    kind: 'http',
+    status: 400,
+    error: { kind: 'known', code: 'INVALID_MARKET_PARAMS', message: 'x', fields },
+  });
+
+  it('keeps the ONE code the amount copy is true for as a 400', () => {
+    // `AMOUNT_TOO_SMALL` is its own documented code and the only quote failure
+    // that is really about the amount. It must stay the caller's problem.
+    expect(quoteErrorStatus(known(400, 'AMOUNT_TOO_SMALL'))).toBe(400);
+    expect(quoteErrorStatus(fielded({ amountUsdc: ['too small'] }))).toBe(400);
+  });
+
+  it('turns a graduated market into a 409, not a "bad order" 400', () => {
+    // Verified live (2026-10-13): the market that graduated between load and
+    // quote answers 400 MARKET_NOT_IN_PRIMARY. Forwarded verbatim it read to the
+    // user as "check the amount" — about an order whose operands were fine.
+    expect(quoteErrorStatus(known(400, 'MARKET_NOT_IN_PRIMARY'))).toBe(409);
+  });
+
+  it('turns a missing market into a 404', () => {
+    expect(quoteErrorStatus(known(400, 'MARKET_NOT_FOUND'))).toBe(404);
+  });
+
+  it('reports a BARE INVALID_MARKET_PARAMS as transient (503), not as the user\'s error', () => {
+    // The bug the user hit. Live evidence: the same market, side and amount
+    // answered 200 nine times and this bare body once, while a market with no
+    // on-chain price answers it every time. It is "Panta could not price this
+    // market on THIS request" — transient, and the adapter re-rolls it before
+    // the caller ever sees it.
+    expect(quoteErrorStatus(known(400, 'INVALID_MARKET_PARAMS'))).toBe(503);
+    expect(isUnpriceableQuoteError(known(400, 'INVALID_MARKET_PARAMS'))).toBe(true);
+  });
+
+  it('does not call a FIELD error unpriceable', () => {
+    // The distinguishing signal is the serializer's own `field`/`fields`: a
+    // body that names a bad field IS the caller's problem and must not be
+    // re-rolled (a bounded retry of a genuinely wrong request is wasted budget
+    // and a delay before the honest copy).
+    expect(isUnpriceableQuoteError(fielded({ amountUsdc: ['invalid'] }))).toBe(false);
+    expect(
+      isUnpriceableQuoteError({
+        kind: 'http',
+        status: 400,
+        error: { kind: 'known', code: 'INVALID_MARKET_PARAMS', message: 'x', field: 'amountUsdc' },
+      }),
+    ).toBe(false);
+    expect(
+      quoteErrorStatus({
+        kind: 'http',
+        status: 400,
+        error: { kind: 'known', code: 'INVALID_MARKET_PARAMS', message: 'x', field: 'amountUsdc' },
+      }),
+    ).toBe(400);
+  });
+
+  it('never retries a failure that is not that one code', () => {
+    for (const error of [
+      known(400, 'AMOUNT_TOO_SMALL'),
+      known(400, 'MARKET_NOT_IN_PRIMARY'),
+      known(400, 'MARKET_NOT_FOUND'),
+      known(401, 'UNAUTHORIZED'),
+      known(429, 'RATE_LIMITED'),
+      known(500, 'INTERNAL_ERROR'),
+      { kind: 'timeout', timeoutMs: 1 },
+      { kind: 'network', message: 'down' },
+      { kind: 'malformed', message: 'bad json' },
+      { kind: 'config', message: 'no key' },
+    ] as readonly PantaTransportError[]) {
+      expect(isUnpriceableQuoteError(error)).toBe(false);
+    }
+  });
+
+  it('does not read an UNKNOWN code as the transient case', () => {
+    // Fail closed: an unrecognised code is not guessed into "retry it".
+    const unknown: PantaTransportError = {
+      kind: 'http',
+      status: 400,
+      error: { kind: 'unknown', rawCode: 'SOMETHING_NEW', message: 'x' },
+    };
+    expect(isUnpriceableQuoteError(unknown)).toBe(false);
+    expect(quoteErrorStatus(unknown)).toBe(400);
+  });
+
+  it('delegates everything else to the shared mapping', () => {
+    expect(quoteErrorStatus(known(401, 'UNAUTHORIZED'))).toBe(502);
+    expect(quoteErrorStatus(known(403, 'FORBIDDEN'))).toBe(502);
+    expect(quoteErrorStatus(known(429, 'RATE_LIMITED'))).toBe(429);
+    expect(quoteErrorStatus(known(500, 'INTERNAL_ERROR'))).toBe(502);
+    expect(quoteErrorStatus({ kind: 'timeout', timeoutMs: 1 })).toBe(504);
+    expect(quoteErrorStatus({ kind: 'config', message: 'no key' })).toBe(503);
+    expect(quoteErrorStatus({ kind: 'network', message: 'down' })).toBe(502);
+  });
+
+  it('never returns 401 or 403 for any quote failure', () => {
+    const all: readonly PantaTransportError[] = [
+      known(400, 'AMOUNT_TOO_SMALL'),
+      known(400, 'MARKET_NOT_IN_PRIMARY'),
+      known(400, 'MARKET_NOT_FOUND'),
+      fielded({ amountUsdc: ['invalid'] }),
+      known(401, 'UNAUTHORIZED'),
+      known(403, 'FORBIDDEN'),
+      known(500, 'INTERNAL_ERROR'),
+      { kind: 'timeout', timeoutMs: 1 },
+      { kind: 'config', message: 'x' },
+      { kind: 'network', message: 'x' },
+      { kind: 'malformed', message: 'x' },
+    ];
+    for (const error of all) {
+      expect(quoteErrorStatus(error)).not.toBe(401);
+      expect(quoteErrorStatus(error)).not.toBe(403);
     }
   });
 });

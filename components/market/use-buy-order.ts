@@ -93,11 +93,22 @@ interface PreparedRequest {
 /** Fixed user copy keyed by the route's HTTP status. Never the response body. */
 function requestErrorMessage(status: number): string {
   if (status === 401 || status === 403) return 'Sign in to continue.';
+  // 400 from the buy routes is now only ever a real complaint about the request
+  // itself (the server maps `AMOUNT_TOO_SMALL` here and Panta's field errors
+  // here) — a market Panta could not price is a 503 and a graduated market is a
+  // 409, so this copy is no longer the blanket lie it was for those.
   if (status === 400) return "That order isn't valid. Check the amount and try again.";
   if (status === 404) return 'That market is no longer available to buy.';
+  // 409 is the server's mapping for the market's own state refusing the order
+  // (`MARKET_NOT_IN_PRIMARY` — it graduated or resolved between page load and
+  // quote). Retrying the same operands cannot fix it.
+  if (status === 409) return "This market isn't open for buying right now.";
   if (status === 429) return 'Too many requests — wait a moment and try again.';
   // 502 is this app's wrapper around an upstream Panta failure (including
-  // Panta rejecting our credentials — never the caller's session).
+  // Panta rejecting our credentials — never the caller's session). 503 is a
+  // transient failure: the upstream is unreachable, or (after the adapter's
+  // bounded re-rolls) Panta could not read this market's live price for the
+  // request. Both mean "try again", and neither claims anything about the order.
   if (status === 502) return 'Trading is temporarily unavailable.';
   if (status === 503) return 'Trading is temporarily unavailable.';
   if (status === 504) return "Panta didn't respond in time.";

@@ -114,6 +114,17 @@ export const RETRYABLE_PANTA_ERROR_CODES = [
   'UPLOAD_NOT_CONFIGURED',
 ] as const;
 
+/**
+ * `user-fixable` means "the same request will fail again until the caller
+ * changes an operand". One caveat, on live evidence (2026-10-13):
+ * `INVALID_MARKET_PARAMS` is documented as user-fixable and IS that when the
+ * body names a field (`"fields": {"amountUsdc": [...]}`), but Panta also returns
+ * it BARE for a market it could not price on that request — a condition that
+ * succeeds on the next attempt for identical operands. That distinction is not
+ * visible from the code alone, so the buy path decides it by whether the body
+ * carries `field`/`fields` (see `isUnpriceableQuoteError` in
+ * lib/panta/transport-status.ts) instead of trusting this classification.
+ */
 export const USER_FIXABLE_PANTA_ERROR_CODES = [
   'EMAIL_TAKEN',
   'INVALID_MARKET_PARAMS',
