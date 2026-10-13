@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowUpRightFromSquare, Loader2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { usePrivyGate } from "@/components/auth/use-privy-gate";
 import {
   displayPrice,
@@ -24,6 +24,7 @@ import {
   percentFromPrice,
 } from "@/lib/format";
 import { useBuyOrder, type BuyOrderController, type BuyOrderStatus } from "./use-buy-order";
+import { usePriceGate, type PriceGateState } from "./use-price-gate";
 import { PantaBadge } from "./panta-badge";
 import { PANTA_ORIGIN, pantaMarketUrl } from "@/lib/share/urls";
 
@@ -96,11 +97,18 @@ const BuyCta = ({
   amountValid,
   buy,
   onPrepare,
+  priceChecking,
 }: {
   side: Side;
   amountValid: boolean;
   buy: BuyOrderController;
   onPrepare: () => void;
+  /**
+   * The buy gate is establishing the market's price. Disables the CTA — the
+   * affordance is withheld until the gate says the market can be quoted, so a
+   * press in this window cannot start an order that cannot be priced.
+   */
+  priceChecking: boolean;
 }) => {
   const { ready, authenticated, unavailable, login } = usePrivyGate();
 
@@ -142,13 +150,13 @@ const BuyCta = ({
     // A refusal retrying cannot fix: offering the button again would invite a
     // press that is known to fail while the order may already have moved money.
     buy.status === "reportRefused";
-  const disabled = busy || settled || !amountValid || !ready;
+  const disabled = busy || settled || !amountValid || !ready || priceChecking;
 
   return (
     <button
       type="button"
       disabled={disabled}
-      aria-busy={busy}
+      aria-busy={busy || priceChecking}
       onClick={() => {
         if (canConfirm) void buy.confirm();
         else if (canReport) void buy.report();
@@ -160,8 +168,12 @@ const BuyCta = ({
           : "bg-[#2D1C00] text-[#FFF2DD] hover:scale-[1.02] active:scale-[0.98]"
       }`}
     >
-      {busy && <Loader2 className="size-4 animate-spin" />}
-      {CTA_LABEL[buy.status]}
+      {(busy || priceChecking) && (
+        <Loader2 className="size-4 animate-spin" />
+      )}
+      {priceChecking && buy.status === "idle"
+        ? "Checking price…"
+        : CTA_LABEL[buy.status]}
     </button>
   );
 };
@@ -336,6 +348,86 @@ const SideButton = ({
 );
 
 /**
+ * The gate states that withhold the slip's controls.
+ *
+ * `checking` is deliberately NOT one: the form stays (with a disabled CTA) so an
+ * in-flight check cannot throw away a half-typed amount. `priced` is the green
+ * light, and `inactive` means this gate is not what stands between the user and a
+ * purchase (they have no session yet).
+ */
+const gateDenies = (
+  state: PriceGateState,
+): state is Exclude<PriceGateState, "checking" | "priced" | "inactive"> =>
+  state === "unpriced" || state === "unknown" || state === "preview";
+
+/**
+ * What replaces the controls when the market cannot be quoted.
+ *
+ * Every line here has to survive being wrong (Phase 2): the copy never claims an
+ * order was placed or that money moved — nothing reaches a wallet before a
+ * signature, and this notice appears before even a quote — and it never blames
+ * the amount, because the thing that failed is Panta's price read, which no edit
+ * to the field can fix. `preview` offers no retry: a fixture market has no live
+ * price to wait for, so a re-check button would be a promise we know is empty.
+ */
+type GateDenialState = Exclude<
+  PriceGateState,
+  "checking" | "priced" | "inactive"
+>;
+
+const GATE_NOTICE: Record<
+  GateDenialState,
+  { headline: string; sub: string; retryable: boolean }
+> = {
+  unpriced: {
+    headline: "No live price for this market right now.",
+    sub: "Panta isn't serving a price for it at this moment, so there is nothing to quote an order against. Nothing was sent and nothing was charged — this usually clears within seconds.",
+    retryable: true,
+  },
+  unknown: {
+    headline: "We couldn't check this market's price.",
+    sub: "Nothing was sent and nothing was charged. Try again in a moment.",
+    retryable: true,
+  },
+  preview: {
+    headline: "This is preview data, not a live market.",
+    sub: "Buying isn't available for a preview market.",
+    retryable: false,
+  },
+};
+
+const PriceGateNotice = ({
+  state,
+  onRetry,
+}: {
+  state: GateDenialState;
+  onRetry: () => void;
+}) => {
+  const copy = GATE_NOTICE[state];
+  return (
+    <div className="mt-4">
+      <div role="status">
+        <p className="font-tusker-6700 text-lg font-semibold tracking-tight text-[#2D1C00]">
+          {copy.headline}
+        </p>
+        <p className="mt-2 text-sm leading-relaxed tracking-tight text-[#2D1C00]/60">
+          {copy.sub}
+        </p>
+      </div>
+      {copy.retryable && (
+        <button
+          type="button"
+          onClick={onRetry}
+          className="mt-4 inline-flex cursor-pointer items-center gap-2 rounded-full bg-[#2D1C00] px-5 py-2.5 text-sm font-semibold tracking-tight text-[#FFF2DD] transition-transform duration-150 hover:scale-[1.02] active:scale-[0.98] motion-reduce:transition-none"
+        >
+          Check again
+        </button>
+      )}
+    </div>
+  );
+};
+
+/**
  * The buy slip — receipt-styled: perforated top edge, mono money, dot-leader
  * rows. Two-step: `Review order` runs the quote/build/assemble pipeline (via
  * useBuyOrder) and fills in the real shares/price/fee; `Sign with wallet` then
@@ -345,10 +437,20 @@ const SideButton = ({
  * reach a quote. The fee row shows Panta's real quote fee once prepared and a
  * dash before — a fabricated estimate is never displayed (Phase 3:
  * fee-disclosure ordering).
+ *
+ * Price gate (Phase 1 + Phase 3): the controls are withheld unless Panta is
+ * serving a live price for this market right now — `Review order` re-checks once
+ * immediately before composing, and only a priced market is quoted. This closes
+ * two things: a user composing an order that no one can quote (which is how the
+ * old flow ended in "check the amount"), and the window between check and use
+ * (TOCTOU), which cannot be closed atomically across an upstream call and is
+ * therefore re-checked at the point of use plus denied by the server. The gate is
+ * an AFFORDANCE — the quote route and Panta remain the authority.
  */
 const BuySlip = ({
   market,
   readAt,
+  provenance,
   side,
   onSelectSide,
 }: {
@@ -360,6 +462,27 @@ const BuySlip = ({
 }) => {
   const [amount, setAmount] = useState("");
   const buy = useBuyOrder();
+  const { authenticated } = usePrivyGate();
+  // Hook order: every hook runs BEFORE the fail-closed guard below, so a
+  // non-primary market takes the same hook path rather than a shorter one.
+  const { state: gateState, recheck, ensurePriced } = usePriceGate({
+    marketId: market.marketId,
+    provenance,
+    active: authenticated,
+  });
+
+  // A prepare that ended in an error may have failed because the window closed
+  // between the pre-quote check and the quote. Re-establish the gate so the slip
+  // says "no live price" instead of leaving an amount field that will fail again.
+  // `recheck` is a stable callback and the guard is on error/idle only, so this
+  // cannot become a loop. Declared before the guard below: hooks run in the same
+  // order on every render, including the render where the guard denies.
+  const idle = buy.status === "idle";
+  const lastError = buy.error;
+  useEffect(() => {
+    if (!idle || !lastError) return;
+    recheck();
+  }, [recheck, idle, lastError]);
 
   // Independent phase guard: even if this component were ever composed onto
   // a non-primary market, it renders nothing (fail-closed deny).
@@ -378,6 +501,13 @@ const BuySlip = ({
   const fee = buy.quote
     ? feeDisclosure("buy", "Panta buy fee", buy.quote.feeUsdc, readAt)
     : null;
+
+  // The gate's deny states — the only ones that withhold the controls. `checking`
+  // keeps the form (with a disabled CTA): less layout churn than a flash, and the
+  // amount a user is typing is never thrown away. `inactive` is not a denial at
+  // all: an unauthenticated visitor gets the connect affordance, which is honest
+  // because a purchase needs a wallet before it needs a price.
+  const deniedState = gateDenies(gateState) ? gateState : null;
 
   return (
     <section
@@ -407,84 +537,100 @@ const BuySlip = ({
         </span>
       </div> */}
 
-      {/* Side selector — mirrors the board selection. Frozen while a request
-          is in flight so a switch cannot race an in-flight quote. */}
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        {SIDES.map((s) => (
-          <button
-            key={s}
-            type="button"
-            disabled={busy}
-            onClick={() => {
-              onSelectSide(s);
-              buy.reset();
-            }}
-            aria-pressed={side === s}
-            className={`cursor-pointer rounded-full py-2 font-mono text-xs font-semibold uppercase tracking-[0.18em] transition-colors duration-150 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 ${
-              side === s
-                ? "bg-[#2D1C00] text-[#FFF2DD]"
-                : "bg-[#2D1C00]/5 text-[#2D1C00]/60 hover:bg-[#2D1C00]/10"
-            }`}
+      {deniedState !== null && buy.status === "idle" ? (
+        <PriceGateNotice state={deniedState} onRetry={recheck} />
+      ) : (
+        <>
+          {/* Side selector — mirrors the board selection. Frozen while a request
+              is in flight so a switch cannot race an in-flight quote. */}
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            {SIDES.map((s) => (
+              <button
+                key={s}
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  onSelectSide(s);
+                  buy.reset();
+                }}
+                aria-pressed={side === s}
+                className={`cursor-pointer rounded-full py-2 font-mono text-xs font-semibold uppercase tracking-[0.18em] transition-colors duration-150 motion-reduce:transition-none disabled:cursor-not-allowed disabled:opacity-60 ${
+                  side === s
+                    ? "bg-[#2D1C00] text-[#FFF2DD]"
+                    : "bg-[#2D1C00]/5 text-[#2D1C00]/60 hover:bg-[#2D1C00]/10"
+                }`}
+              >
+                {s.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          <label
+            htmlFor="buy-amount"
+            className="mt-5 block font-mono text-md font-medium tracking-tight text-[#2D1C00]/50"
           >
-            {s.toUpperCase()}
-          </button>
-        ))}
-      </div>
+            Amount (USDC)
+          </label>
+          <input
+            id="buy-amount"
+            type="text"
+            inputMode="decimal"
+            autoComplete="off"
+            spellCheck={false}
+            disabled={busy}
+            value={amount}
+            onChange={(e) => {
+              setAmount(e.target.value);
+              // A prepared/submitted order belongs to the old amount; drop it so
+              // the CTA never acts on bytes that no longer match the field.
+              // Non-idle includes the post-send states, which is the user's only
+              // way back to a fresh order after an ambiguous send.
+              if (buy.status !== "idle") buy.reset();
+            }}
+            placeholder="0.00"
+            aria-label="Amount in USDC"
+            aria-invalid={amountInvalid || undefined}
+            className="mt-2 w-full rounded-full bg-[#2D1C00]/5 px-4 py-3 font-tusker-6700 text-lg font-semibold tracking-tight text-[#2D1C00] placeholder:text-[#2D1C00]/35 outline-none ring-1 ring-[#2D1C00]/10 transition focus:ring-2 focus:ring-[#2D1C00]/30 disabled:opacity-60"
+          />
+          {amountInvalid && (
+            <p className="mt-2 text-xs font-medium text-red-700" role="alert">
+              Enter a USDC amount like 25 or 25.50.
+            </p>
+          )}
 
-      <label
-        htmlFor="buy-amount"
-        className="mt-5 block font-mono text-md font-medium tracking-tight text-[#2D1C00]/50"
-      >
-        Amount (USDC)
-      </label>
-      <input
-        id="buy-amount"
-        type="text"
-        inputMode="decimal"
-        autoComplete="off"
-        spellCheck={false}
-        disabled={busy}
-        value={amount}
-        onChange={(e) => {
-          setAmount(e.target.value);
-          // A prepared/submitted order belongs to the old amount; drop it so the
-          // CTA never acts on bytes that no longer match the field. Non-idle
-          // includes the post-send states, which is the user's only way back to
-          // a fresh order after an ambiguous send.
-          if (buy.status !== "idle") buy.reset();
-        }}
-        placeholder="0.00"
-        aria-label="Amount in USDC"
-        aria-invalid={amountInvalid || undefined}
-        className="mt-2 w-full rounded-full bg-[#2D1C00]/5 px-4 py-3 font-tusker-6700 text-lg font-semibold tracking-tight text-[#2D1C00] placeholder:text-[#2D1C00]/35 outline-none ring-1 ring-[#2D1C00]/10 transition focus:ring-2 focus:ring-[#2D1C00]/30 disabled:opacity-60"
-      />
-      {amountInvalid && (
-        <p className="mt-2 text-xs font-medium text-red-700" role="alert">
-          Enter a USDC amount like 25 or 25.50.
-        </p>
+          {/* Estimate rows — real values from the quote once prepared; a
+              fabricated estimate is never shown before the quote exists. */}
+          <dl className="mt-5 space-y-2.5 border-t border-[#2D1C00]/10 pt-4 text-sm">
+            <SlipRow label="Est. shares" value={buy.quote ? buy.quote.shares : "—"} />
+            <SlipRow
+              label="Avg price"
+              value={buy.quote ? formatPriceUsdc(buy.quote.avgPrice) : "—"}
+            />
+            <SlipRow
+              label="Panta buy fee"
+              value={fee ? formatUsdc(fee.amountUsdc) : "—"}
+              note={fee ? `as of ${formatAsOf(fee.shownAt)}` : undefined}
+            />
+          </dl>
+
+          <BuyCta
+            side={side}
+            amountValid={amountResult.success}
+            buy={buy}
+            priceChecking={gateState === "checking"}
+            onPrepare={() => {
+              void (async () => {
+                // Re-check at the point of use (Phase 3: TOCTOU). A market that
+                // is priced — or one whose price we could not read, where the
+                // quote itself is the authority — proceeds to a quote.
+                if (await ensurePriced()) {
+                  await buy.prepare(primary.marketId, side, amount);
+                }
+              })();
+            }}
+          />
+        </>
       )}
-
-      {/* Estimate rows — real values from the quote once prepared; a fabricated
-          estimate is never shown before the quote exists. */}
-      <dl className="mt-5 space-y-2.5 border-t border-[#2D1C00]/10 pt-4 text-sm">
-        <SlipRow label="Est. shares" value={buy.quote ? buy.quote.shares : "—"} />
-        <SlipRow
-          label="Avg price"
-          value={buy.quote ? formatPriceUsdc(buy.quote.avgPrice) : "—"}
-        />
-        <SlipRow
-          label="Panta buy fee"
-          value={fee ? formatUsdc(fee.amountUsdc) : "—"}
-          note={fee ? `as of ${formatAsOf(fee.shownAt)}` : undefined}
-        />
-      </dl>
-
-      <BuyCta
-        side={side}
-        amountValid={amountResult.success}
-        buy={buy}
-        onPrepare={() => void buy.prepare(primary.marketId, side, amount)}
-      />
 
       {buy.error && (
         <p

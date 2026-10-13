@@ -9,11 +9,12 @@
  */
 import { describe, expect, it } from 'vitest';
 import { marketIdSchema } from './ids';
-import { usdcDecimalSchema } from './money';
+import { priceSchema, usdcDecimalSchema } from './money';
 import { unixSecondsSchema } from './time';
 import {
   MARKET_PHASES,
   effectivePhase,
+  isPriced,
   isPrimaryMarket,
   isSettled,
   requirePrimaryMarket,
@@ -115,5 +116,35 @@ describe('requirePrimaryMarket', () => {
         );
       }
     }
+  });
+});
+
+describe('isPriced — did Panta serve a priced read?', () => {
+  const yes = priceSchema.parse('0.63');
+  const no = priceSchema.parse('0.37');
+
+  it('is true only when BOTH sides carry a price', () => {
+    expect(isPriced(market({ yesPrice: yes, noPrice: no }))).toBe(true);
+    // The lean variant nulls the whole price block; either side missing is not
+    // enough to quote from, so it fails closed.
+    expect(isPriced(market({ yesPrice: yes, noPrice: null }))).toBe(false);
+    expect(isPriced(market({ yesPrice: null, noPrice: no }))).toBe(false);
+    expect(isPriced(market({ yesPrice: null, noPrice: null }))).toBe(false);
+  });
+
+  it('does not read a zero price as "unpriced"', () => {
+    // 0 and null are different facts: `read-adapters` maps an absent wire price
+    // to null, so 0 is a real (if extreme) price that Panta did serve.
+    expect(
+      isPriced(market({ yesPrice: priceSchema.parse('0'), noPrice: priceSchema.parse('1') })),
+    ).toBe(true);
+  });
+
+  it('is independent of phase: a settled market can still be priced', () => {
+    // The price read and the phase are separate upstream facts, which is why the
+    // buy gate needs both — and why this predicate must not absorb the phase.
+    expect(
+      isPriced(market({ phase: 'secondary', resolved: true, yesPrice: yes, noPrice: no })),
+    ).toBe(true);
   });
 });

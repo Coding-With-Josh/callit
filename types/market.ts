@@ -111,6 +111,36 @@ export const effectivePhase = (market: Market): MarketPhase =>
       ? 'resolved'
       : market.phase;
 
+/**
+ * The two fields that carry "Panta served a PRICED read for this market".
+ *
+ * `read-adapters` maps an absent/unparseable wire price to `null` (never to 0),
+ * so a null price is Panta telling us it could not read the market's on-chain
+ * price on that request — not a price of zero.
+ */
+export type PricedFields = Pick<Market, 'yesPrice' | 'noPrice'>;
+
+/**
+ * True when BOTH sides carry a price, i.e. Panta served the priced variant of
+ * this market rather than the lean one.
+ *
+ * Why this is a gate and not a display detail (measured live 2026-10-13):
+ * Panta serves the market read in two variants per request, and while a market
+ * is in the lean one `/primaryorderquote/` answers a bare
+ * `{"code":"INVALID_MARKET_PARAMS"}` — so a buy slip that invites an amount
+ * during an unpriced window collects an order that cannot be quoted at all. The
+ * window is per-market and lasts seconds to tens of seconds (one market's
+ * `/prices/` path read 200, 200, 404, 404, 200 inside twelve seconds), so the
+ * answer is to fail closed at the control and offer a re-check, never to promise
+ * the order will go through.
+ *
+ * BOTH sides are required, which fails closed: a binary market has a price on
+ * each side on-chain, so a half-priced read is not trustworthy enough to quote
+ * from.
+ */
+export const isPriced = (market: PricedFields): boolean =>
+  market.yesPrice !== null && market.noPrice !== null;
+
 /** Type guard: is this market a LIVE primary market (the only buyable state)? */
 export function isPrimaryMarket(market: Market): market is PrimaryMarket {
   // Both conditions. `phase` alone is an upstream string that flaps; the stable
