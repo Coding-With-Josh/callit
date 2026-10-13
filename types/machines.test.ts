@@ -38,7 +38,11 @@ const baseMarket = {
   noPrice: null,
 };
 
-const primary: PrimaryMarket = { ...baseMarket, phase: 'primary' };
+const primary: PrimaryMarket = {
+  ...baseMarket,
+  phase: 'primary',
+  resolved: false,
+};
 const secondary: SecondaryMarket = { ...baseMarket, phase: 'secondary' };
 
 const quote: BuyQuote = {

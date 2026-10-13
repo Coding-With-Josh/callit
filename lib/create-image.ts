@@ -28,7 +28,7 @@
  * from generated constants (`./preview-card-art`), never from user input.
  */
 import { formatPriceUsdc } from "@/lib/format";
-import type { Market, MarketPhase } from "@/types";
+import { effectivePhase, type Market, type MarketPhase } from "@/types";
 import {
   PREVIEW_CARD_BUBBLE_SVG,
   PREVIEW_CARD_BUBBLE_TRANSLATE,
@@ -133,11 +133,16 @@ const CARD_PHASE_LABELS: Record<MarketPhase, string> = {
  * price renders an honest "$—" rather than a fabricated number. The price is
  * read from the same `Market.yesPrice` the TradeDeck displays — never a stale
  * or invented value (Phase 2: degraded fallback).
+ *
+ * The label reads `effectivePhase`, not the raw wire phase: Panta's phase string
+ * flips between "resolved" and "secondary" for the same settled market between
+ * reads, which would bake a different word ("graduated" vs "resolved") into the
+ * shared card image on each read (Phase 3: copy drift on the shared artifact).
  */
 export function previewCardSlotsForMarket(market: Market): PreviewCardSlots {
   return {
     headline: market.title,
-    phase: CARD_PHASE_LABELS[market.phase],
+    phase: CARD_PHASE_LABELS[effectivePhase(market)],
     price: market.yesPrice === null ? "$—" : formatPriceUsdc(market.yesPrice),
   };
 }

@@ -119,4 +119,37 @@ describe('buildActionMetadata', () => {
     expect(meta.title.length).toBeLessThanOrEqual(BLINK_TITLE_MAX);
     expect(meta.description.length).toBeLessThanOrEqual(BLINK_DESCRIPTION_MAX);
   });
+
+  it('disables a settled market whose phase string flapped to primary', () => {
+    // The flap: Panta's `phase` alternates for the same settled market between
+    // reads. If it read "primary" while the market was settled, a phase-only
+    // gate would advertise four buy buttons the POST then refuses (Phase 3:
+    // buy-control bypass on the share surface).
+    const flapped: MarketFixture = {
+      ...LIVE_PRIMARY,
+      market: { ...LIVE_PRIMARY.market, phase: 'primary', resolved: true },
+    };
+    const meta = buildActionMetadata(flapped);
+    expect(meta.disabled).toBe(true);
+    expect(meta.links).toBeUndefined();
+    expect(meta.label).toBe('Market resolved');
+    expect(meta.description).toContain('This market is resolved.');
+  });
+
+  it('describes a settled market as resolved, never as graduated', () => {
+    // Both reads of the SAME settled market: one says "resolved", one says
+    // "secondary". The card must say the same thing both times.
+    for (const phase of ['resolved', 'secondary'] as const) {
+      const settled: MarketFixture = {
+        ...LIVE_PRIMARY,
+        market: { ...LIVE_PRIMARY.market, phase, resolved: true },
+      };
+      const meta = buildActionMetadata(settled);
+      expect(meta.disabled).toBe(true);
+      expect(meta.links).toBeUndefined();
+      expect(meta.label).toBe('Market resolved');
+      expect(meta.description).toContain('This market is resolved.');
+      expect(meta.description).not.toContain('graduated');
+    }
+  });
 });

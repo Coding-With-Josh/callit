@@ -9,13 +9,17 @@ import {
   SORT_KEYS,
   compareMarkets,
   displayTitle,
-  effectivePhase,
   isPresentable,
   type SortKey,
 } from "@/lib/browse-order";
 import { formatUsdcCompact, percentFromPrice } from "@/lib/format";
 import type { MarketFixture } from "@/lib/market-fixtures";
-import { MARKET_PHASES, type DataProvenance, type MarketPhase } from "@/types";
+import {
+  MARKET_PHASES,
+  effectivePhase,
+  type DataProvenance,
+  type MarketPhase,
+} from "@/types";
 
 const PHASE_LABELS: Record<MarketPhase, string> = {
   primary: "Open",

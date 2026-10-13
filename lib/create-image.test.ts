@@ -130,4 +130,20 @@ describe("previewCardSlotsForMarket", () => {
       price: "$—",
     });
   });
+
+  it("labels a settled market as resolved even when the wire phase flaps", () => {
+    // Panta's phase string alternates between "resolved" and "secondary" for the
+    // same settled market between reads. The shared card image must not bake a
+    // different word in on each read.
+    for (const phase of ["resolved", "secondary"] as const) {
+      const market = {
+        phase,
+        resolved: true,
+        title: "Was X?",
+        yesPrice: "0.03",
+        noPrice: "0.97",
+      } as unknown as Market;
+      expect(previewCardSlotsForMarket(market).phase).toBe("resolved");
+    }
+  });
 });

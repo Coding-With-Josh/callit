@@ -2,8 +2,15 @@
  * market — the market model and the phase guard.
  *
  * Owns: Side, MarketPhase, the Market domain type, phase-narrowed subtypes
- * (PrimaryMarket and friends), and the "buying is only valid in primary" guard
- * with an explicit link-out result for secondary/resolved/cancelled.
+ * (PrimaryMarket and friends), the settled signal (`isSettled`/`effectivePhase`)
+ * and the "buying is only valid in a live primary market" guard with an explicit
+ * link-out result for secondary/resolved/cancelled.
+ *
+ * Why the settled signal lives here: the wire's `phase` is observed to flap
+ * between "resolved" and "secondary" for the same settled market between reads,
+ * while the `resolved` flag stays true. Every gate, label and sort in the app is
+ * therefore keyed on the stable flag, and this module is the one place that
+ * decides what "settled" and "the phase to display" mean.
  * Must not import: buy/create/draft lifecycles, adapters, or any framework.
  */
 import { err, ok, type Result } from './result';
@@ -40,9 +47,16 @@ export interface Market {
   readonly noPrice: Price | null;
 }
 
-/** A market in the primary phase — the only phase where buying is valid. */
+/** A LIVE market in the primary phase — the only state where buying is valid. */
 export interface PrimaryMarket extends Market {
   readonly phase: 'primary';
+  /**
+   * A settled market can never be bought, whatever the wire's `phase` says (see
+   * `isSettled`), so the buyable subtype pins the flag instead of leaving it
+   * `boolean`. `startBuyQuote` therefore cannot be handed a settled market even
+   * by a caller that skipped the guard.
+   */
+  readonly resolved: false;
 }
 
 /** A graduated market; read-only through this API (link out to Panta). */
@@ -67,25 +81,76 @@ export interface MarketLinkOut {
   readonly reason: string;
 }
 
-/** Type guard: is this market in the primary (buyable) phase? */
+/**
+ * A settled market can no longer be traded: it resolved, or it was cancelled.
+ *
+ * Keyed on the `resolved` flag, NOT the wire's `phase` string. Panta's `phase`
+ * has been observed alternating between "resolved" and "secondary" for the SAME
+ * settled market between requests, while `resolved` stayed true — so anything
+ * built on `phase` alone (a sort, a filter, a row label, a buy gate) can
+ * misclassify one read as another. `phase === 'cancelled'` is included because no
+ * flag distinguishes that case.
+ */
+export const isSettled = (market: Market): boolean =>
+  market.resolved || market.phase === 'cancelled';
+
+/**
+ * The market's phase with the unstable wire value normalised away.
+ *
+ * `phase` flips between "resolved" and "secondary" for the same settled market
+ * between reads, which made a row's own label, the browse's phase chips, and the
+ * detail page's "resolved"/"graduated" headline change under the user. The stable
+ * `resolved` flag wins; `cancelled` is preserved because no flag marks it. Every
+ * surface that NAMES a phase reads this instead of the raw value, so two reads of
+ * one market cannot disagree.
+ */
+export const effectivePhase = (market: Market): MarketPhase =>
+  market.phase === 'cancelled'
+    ? 'cancelled'
+    : market.resolved
+      ? 'resolved'
+      : market.phase;
+
+/** Type guard: is this market a LIVE primary market (the only buyable state)? */
 export function isPrimaryMarket(market: Market): market is PrimaryMarket {
-  return market.phase === 'primary';
+  // Both conditions. `phase` alone is an upstream string that flaps; the stable
+  // `resolved` flag is what makes "primary" mean "still buyable".
+  return market.phase === 'primary' && !market.resolved;
 }
 
 /**
- * Require a market to be primary, or return a link-out. This is the single
- * gate that makes "buying only in primary" explicit and testable.
+ * The phase word a link-out report shows.
+ *
+ * Never "primary": a link-out is only built for a market that is NOT buyable, so
+ * reporting "primary" would describe a live market as un-buyable. The stable
+ * `resolved` flag outranks the flapping wire string, so a settled market always
+ * reads as resolved rather than sometimes as "graduated".
+ */
+function linkOutPhase(market: Market): MarketLinkOut['phase'] {
+  if (market.phase === 'cancelled') return 'cancelled';
+  if (market.resolved) return 'resolved';
+  return market.phase === 'resolved' ? 'resolved' : 'secondary';
+}
+
+/**
+ * Require a market to be a LIVE primary market, or return a link-out. This is the
+ * single gate that makes "buying only in primary" explicit and testable.
+ *
+ * BOTH conditions are required (Phase 3: buy-control bypass). A phase-only gate
+ * would render buy controls for a settled market whose `phase` had flapped to
+ * "primary", offering an action the POST path refuses. Fail-closed: absent proof
+ * that the market is live, the answer is no.
  */
 export function requirePrimaryMarket(
   market: Market,
 ): Result<PrimaryMarket, MarketLinkOut> {
-  if (market.phase === 'primary') {
-    // `market.phase === 'primary'` proves the subtype; the cast records that.
-    return ok(market as PrimaryMarket);
+  if (isPrimaryMarket(market)) {
+    // The guard proves phase and `resolved: false`; narrowing records that.
+    return ok(market);
   }
   return err({
     kind: 'link-out',
-    phase: market.phase,
-    reason: `market is in phase "${market.phase}"; primary buys are only valid in "primary"`,
+    phase: linkOutPhase(market),
+    reason: `market is not a live primary market (phase "${market.phase}", resolved ${market.resolved}); primary buys are only valid in "primary"`,
   });
 }

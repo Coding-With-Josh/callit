@@ -20,6 +20,8 @@
 import {
   actionGetResponseSchema,
   PANTA_BADGE,
+  effectivePhase,
+  isPrimaryMarket,
   type ActionGetResponse,
   type Market,
 } from '@/types';
@@ -97,6 +99,11 @@ function oddsLine(fixture: MarketFixture): string | null {
  * that has no on-chain existence — an action the POST refuses. Offering an
  * action we will refuse is itself the fail-open shape (Phase 3: demo-provenance
  * money path), so provenance is checked before phase.
+ *
+ * The switch reads `effectivePhase`, not the raw wire `phase`: Panta's phase
+ * string flips between "resolved" and "secondary" for the same settled market
+ * between reads, so a settled market used to be described as "graduated and
+ * read-only here" on one read and "resolved" on the next (Phase 3: copy drift).
  */
 function disabledCopy(fixture: MarketFixture): { label: string; reason: string } {
   if (fixture.provenance === 'fixture') {
@@ -105,7 +112,7 @@ function disabledCopy(fixture: MarketFixture): { label: string; reason: string }
       reason: 'This is a demo market. No funds can move.',
     };
   }
-  switch (fixture.market.phase) {
+  switch (effectivePhase(fixture.market)) {
     case 'secondary':
       return {
         label: 'Trading closed',
@@ -128,15 +135,19 @@ function disabledCopy(fixture: MarketFixture): { label: string; reason: string }
  *
  * Total and fail-closed: it never throws, and the returned object is validated
  * against `actionGetResponseSchema` before it leaves this function. A fixture
- * market, or one in any phase other than `primary`, gets `disabled: true` and NO
+ * market, or any market that is not a LIVE primary market (a phase other than
+ * `primary`, or the settled flag set), gets `disabled: true` and NO
  * `links.actions`, so a client cannot render a buy button for a market the POST
  * would refuse.
  */
 export function buildActionMetadata(fixture: MarketFixture): ActionGetResponse {
   const { market, provenance, disclaimer } = fixture;
   // Both conditions, not phase alone: a fixture's phase is `primary` and it must
-  // still never advertise a buy button (see `disabledCopy`).
-  const isBuyable = market.phase === 'primary' && provenance !== 'fixture';
+  // still never advertise a buy button (see `disabledCopy`), and a settled market
+  // whose phase string flapped to "primary" must not either — the POST path
+  // refuses it, so advertising it would be an action we then reject (Phase 3:
+  // buy-control bypass on the share surface).
+  const isBuyable = isPrimaryMarket(market) && provenance !== 'fixture';
 
   const parts: string[] = [];
   if (provenance === 'fixture') {

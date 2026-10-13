@@ -7,7 +7,7 @@ import {
 import { loadCoverFontCssServer } from "@/lib/create-image.server";
 import { type MarketFixture } from "@/lib/market-fixtures";
 import { formatUnixDate, formatUsdcCompact } from "@/lib/format";
-import { type Market, type MarketPhase } from "@/types";
+import { effectivePhase, type Market, type MarketPhase } from "@/types";
 import { PantaBadge } from "./panta-badge";
 import { ShareMenu } from "./share-menu";
 import { TradeDeck } from "./trade-deck";
@@ -62,7 +62,11 @@ export const MarketDetail = async ({ fixture }: { fixture: MarketFixture }) => {
         <div className="flex flex-wrap items-center justify-start gap-3">
           <div className="flex items-center justify-center rounded-full px-3 py-1 bg-[#2D1C00]">
             <p className="text-xs font-semibold tracking-tight text-[#FFF2DD]">
-              {PHASE_LABELS[market.phase]}
+              {/* effectivePhase, not the raw wire `phase`: Panta's phase string
+                  flips between "resolved" and "secondary" for the same settled
+                  market between reads, which made this chip disagree with the
+                  headline below it (Phase 3: copy/state drift). */}
+              {PHASE_LABELS[effectivePhase(market)]}
             </p>
           </div>
           <div className="flex items-center justify-center rounded-full px-3 py-1 bg-[#2D1C00]/10">

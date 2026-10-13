@@ -9,11 +9,13 @@
  * Must not import: React or Next.
  *
  * Presentation only. Nothing here grants or denies buy access; the buy gate is
- * `types/market::requirePrimaryMarket`, re-checked inside TradeDeck and again
- * inside BuySlip (Phase 1: complete mediation).
+ * `types/market::requirePrimaryMarket`, re-checked inside TradeDeck, inside
+ * BuySlip, and on the Blink GET/POST (Phase 1: complete mediation). The settled
+ * signal itself (`isSettled`) is imported from `types/market` so the browse and
+ * the money path can never disagree about what "settled" means.
  */
+import { isSettled, type Market } from '@/types';
 import type { MarketFixture } from '@/lib/market-fixtures';
-import type { Market, MarketPhase } from '@/types';
 
 /** How the filtered list is ordered. Volume is the default (BigInt, no floats). */
 export type SortKey = 'volume' | 'closing' | 'newest';
@@ -22,20 +24,6 @@ export const SORT_KEYS: readonly SortKey[] = ['volume', 'closing', 'newest'];
 
 /** Rows revealed on first paint and on each "Load more" press. */
 export const PAGE_SIZE = 12;
-
-/**
- * A settled market can no longer be traded: it resolved, or it was cancelled.
- *
- * Keyed on the `resolved` flag, NOT the wire's `phase` string. `phase` has been
- * observed alternating between "resolved" and "secondary" for the SAME settled
- * market between requests, while `resolved` stayed true — so any sort, filter or
- * label built on `phase` reshuffles the list and mislabels rows between loads.
- * `phase === 'cancelled'` is included because the flag does not cover it.
- * Fail-closed direction: an unknown/absent phase is treated as unsettled unless
- * the flag says otherwise, so a live market is never silently hidden.
- */
-export const isSettled = (market: Market): boolean =>
-  market.resolved || market.phase === 'cancelled';
 
 /**
  * Whether a loaded market may be shown as a row at all.
@@ -52,23 +40,6 @@ export const isPresentable = (fixture: MarketFixture): boolean =>
 /** The row/detail heading for a market: upstream title, or an explicit fallback. */
 export const displayTitle = (market: Market): string =>
   market.title.trim() || 'Untitled market';
-
-/**
- * The market's phase with the unstable wire value normalised away.
- *
- * `phase` flips between "resolved" and "secondary" for the same settled market
- * between requests, which made a row's own label (and any chip filtering on it)
- * change between loads. The `resolved` flag is stable, so it wins; `cancelled`
- * is preserved because no flag distinguishes it. Chips, chip filtering and row
- * labels all read this instead of the raw `phase`, so what a chip selects and
- * what a row says can never disagree.
- */
-export const effectivePhase = (market: Market): MarketPhase =>
-  market.phase === 'cancelled'
-    ? 'cancelled'
-    : market.resolved
-      ? 'resolved'
-      : market.phase;
 
 /**
  * Compare two USDC decimal strings DESCENDING without float conversion: whole

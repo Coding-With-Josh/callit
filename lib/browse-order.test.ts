@@ -5,9 +5,7 @@ import {
   SORT_KEYS,
   compareMarkets,
   displayTitle,
-  effectivePhase,
   isPresentable,
-  isSettled,
 } from './browse-order';
 
 /**
@@ -39,15 +37,6 @@ const fixture = (overrides: Partial<Market> = {}): MarketFixture => ({
 });
 
 describe('browse order', () => {
-  it('treats a resolved flag or a cancelled phase as settled', () => {
-    expect(isSettled(market({ resolved: true }))).toBe(true);
-    expect(isSettled(market({ phase: 'cancelled' }))).toBe(true);
-    expect(isSettled(market({ phase: 'primary' }))).toBe(false);
-    // The flapping pair: both reads of the SAME settled market are settled.
-    expect(isSettled(market({ phase: 'resolved', resolved: true }))).toBe(true);
-    expect(isSettled(market({ phase: 'secondary', resolved: true }))).toBe(true);
-  });
-
   it('hides an untitled SETTLED market but keeps an untitled LIVE one', () => {
     // Regression: the catalog's only buyable market is untitled, and the old
     // "drop every untitled market" rule hid the only row a visitor could act on.
@@ -97,13 +86,5 @@ describe('browse order', () => {
     expect(displayTitle(market({ title: '' }))).toBe('Untitled market');
     expect(displayTitle(market({ title: '  ' }))).toBe('Untitled market');
     expect(displayTitle(market({ title: '  Padded  ' }))).toBe('Padded');
-  });
-
-  it('normalises the flapping phase so a settled market reads as resolved', () => {
-    expect(effectivePhase(market({ phase: 'secondary', resolved: true }))).toBe('resolved');
-    expect(effectivePhase(market({ phase: 'resolved', resolved: true }))).toBe('resolved');
-    expect(effectivePhase(market({ phase: 'cancelled', resolved: true }))).toBe('cancelled');
-    expect(effectivePhase(market({ phase: 'primary' }))).toBe('primary');
-    expect(effectivePhase(market({ phase: 'secondary' }))).toBe('secondary');
   });
 });
